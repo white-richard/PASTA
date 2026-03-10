@@ -97,7 +97,10 @@ class S2T_Dataset(Dataset):
         self.raw_data = utils.load_dataset_file(path[phase])
         self.tokenizer = tokenizer
         self.phase = phase
-        self.descript_feat = torch.load(config["data"]["descript_feat_path"][phase])
+        # self.descript_feat = torch.load(config["data"]["descript_feat_path"][phase])
+        self.descript_feat = torch.load(
+            config["data"]["descript_feat_path"][phase], weights_only=False
+        )
         self.max_length = config["data"]["max_length"]
         self.img_path = config["data"]["img_path"]
 

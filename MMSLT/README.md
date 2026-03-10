@@ -1,8 +1,8 @@
 # MMSLT
 
-## Setup (Python 3.10 + CUDA 12.1)
+## Setup
 
-**Prerequisites:** `uv` ([install](https://docs.astral.sh/uv/getting-started/installation/)), CUDA 12.1 toolkit, and `git`.
+**Prerequisites:** `uv` ([install](https://docs.astral.sh/uv/getting-started/installation/)) and `git`.
 
 ### 1. Download Phoenix dataset
 
@@ -47,25 +47,22 @@ git checkout 2ab4528fad5548315cf61e40c2249fec8c8ad233
 git checkout -b py310-patch
 sed -i 's/gensim~=3.8.3/gensim>=4.0.1/' requirements.txt
 git commit -am 'Relax gensim requirement to >=4.0.1 for Python 3.10 compatibility'
-cd ..
+cd ../..
 ```
 
-### 4. Install PyTorch and Flash Attention
+### 4. Install dependencies
 
 ```bash
-uv pip install torch==2.4.1+cu121 torchaudio==2.4.1+cu121 torchvision==0.19.1+cu121 \
-    packaging ninja setuptools wheel \
-    --extra-index-url https://download.pytorch.org/whl/cu121
+uv pip install --upgrade pip setuptools wheel packaging ninja
 
-uv pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.0.post2/flash_attn-2.7.0.post2+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
-```
+uv pip install torch torchvision torchaudio \
+  --index-url https://download.pytorch.org/whl/cu124
+  
+uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 
-> **Do not upgrade `torch` or `flash-attn` after this step.**
+uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
 
-### 5. Install remaining dependencies
-
-```bash
-uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+uv pip install --upgrade "wandb>=0.19"
 ```
 
 The `requirements.txt` references `nlg-eval-temp` via a relative path.
@@ -84,7 +81,7 @@ Before training, you must convert the raw LLaVA-generated text descriptions into
 3. Overwrites the same files with the enriched format: `{video_name: {'texts': [...], 'bert_feat': tensor}}`
 
 ```bash
-cd ~/.code/asl-llm/MMSLT && jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
+cd MMSLT && jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
 ```
 
 ---
@@ -92,6 +89,11 @@ cd ~/.code/asl-llm/MMSLT && jupyter nbconvert --to notebook --execute --inplace 
 ### 2. **MMLP Training**
 
 To train the MMLP (MultiModal Language Processing) model, run the following command:
+
+We should be in the MMSLT dir for training:
+```bash
+cd MMSLT
+```
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
@@ -102,7 +104,7 @@ CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
 --epochs 80 \
 --opt adamw \
 --lr 1e-4 \
---output_dir pretrain_models/mmlp \
+--output_dir pretrain_models/mmlp
 ```
 
 ---
@@ -128,9 +130,3 @@ CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
 
 - The `--nproc_per_node=4` flag specifies that the training will use 4 GPUs. Adjust this based on your available GPU resources. However, for exact reproducibility of the results, it is highly recommended to use 4 GPUs as specified.
 - Text sign descriptions and weight files in our [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
-
-Ignore this
-
-```bash
-LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/python3.10/site-packages/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH
-```
