@@ -1,0 +1,14 @@
+name: MMSLT
+data:
+    label_path:
+        train: ../datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.train.corpus.csv
+        dev: ../datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.dev.corpus.csv
+        test: ../datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.test.corpus.csv
+    descript_feat_path:
+        train: ../datasets/phoenix-descript/phoenix_SLdescriptions.train
+        dev: ../datasets/phoenix-descript/phoenix_SLdescriptions.dev
+        test: ../datasets/phoenix-descript/phoenix_SLdescriptions.test
+    img_path: ../datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px
+    max_length: 500
+training:
+    wandb: disabled # online or disabled
