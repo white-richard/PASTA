@@ -16,6 +16,13 @@ tar xzf phoenix-2014-T.v3.tar.gz
 cd ..
 ```
 
+You'll need to download the video description labels using the google drive link at the bottom. Move them into this dir: `datasets/phoenix-descript`
+
+datasets/phoenix-descript
+├── phoenix_SLdescriptions.dev
+├── phoenix_SLdescriptions.test
+└── phoenix_SLdescriptions.train
+
 CSL requires a formal request; use Phoenix for reproducibility verification.
 
 ### 2. Create virtual environment
@@ -62,47 +69,54 @@ uv pip install -r requirements.txt --extra-index-url https://download.pytorch.or
 The `requirements.txt` references `nlg-eval-temp` via a relative path.
 All other packages install from PyPI or the PyTorch index without compilation.
 
-### Verify key package versions
-
-```bash
-uv pip freeze | grep -E 'torch==|nltk==|keras==|h11==|gensim=='
-# Expected:
-#   gensim==4.4.0   (or newer)
-#   h11==0.16.0     (or newer)
-#   keras==3.x.x    (>= 2.13.1)
-#   nltk==3.9.3     (or newer)
-#   torch==2.4.1+cu121
-```
-
 ## Installation
 
 ## Code Descriptions
 
-### 1. **MMLP Training**
+### 1. **Generate BERT Description Embeddings**
 
-  
+Before training, you must convert the raw LLaVA-generated text descriptions into BERT embeddings. The `descript_embed.ipynb` notebook does the following:
+
+1. Loads `phoenix_SLdescriptions.{train,dev,test}` from `datasets/phoenix-descript/` — each file is a dict of `{video_name: [list of text descriptions]}`
+2. Runs each video's descriptions through `bert-base-cased`, taking the CLS token embedding as a 768-dim feature vector per description
+3. Overwrites the same files with the enriched format: `{video_name: {'texts': [...], 'bert_feat': tensor}}`
+
+```bash
+cd ~/.code/asl-llm/MMSLT && LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/python3.10/site-packages/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
+```
+
+---
+
+### 2. **MMLP Training**
+
 To train the MMLP (MultiModal Language Processing) model, run the following command:
 
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch \
-    
+    CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
+
     --nproc_per_node=4 \
     --master_port=1234 \
     --use_env train_mmlp.py \
     --batch-size 4 \
     --epochs 80 \
-    --opt adamw \ 
-    --lr 1e-4 \ 
-    --output_dir /path/to/your/path/pretrain_models/mmlp
+    --opt adamw \
+    --lr 1e-4 \
+    --output_dir pretrain_models/mmlp \
+    --nproc_per_node 1
 
-- Replace `/path/to/your/path/pretrain_models/mmlp` with the directory path where you want to save the MMLP model checkpoints and outputs.
+```bash
+LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/python3.10/site-packages/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH \
+CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
+  --nproc_per_node=1 --master_port=1234 --use_env train_mmlp.py \
+  --batch-size 4 --epochs 80 --opt adamw --lr 1e-4 --output_dir pretrain_models/mmlp
+```
 
-----------
+---
 
 ### 2. **MMSLT Training**
 
 To fine-tune the MMSLT (MultiModal Spoken Language Translation) model, run the following command:
 
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch \
+    CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
     --nproc_per_node=4 \
     --master_port=1234 \
     --use_env train_mmslt.py \
@@ -110,14 +124,10 @@ To fine-tune the MMSLT (MultiModal Spoken Language Translation) model, run the f
     --epochs 200 \
     --opt adamw \
     --lr 1e-4 \
-    --finetune /path/to/your/path/pretrain_models/mmlp/best_checkpoint.pth \
-    --output_dir /path/to/your/path/out/mmslt
-
-- Replace `/path/to/your/path/pretrain_models/mmlp/best_checkpoint.pth` with the path to the best checkpoint from the MMLP training process.
-
-- Replace `/path/to/your/path/out/mmslt` with the directory path where you want to save the MMSLT model checkpoints and outputs.
+    --finetune pretrain_models/mmlp/best_checkpoint.pth \
+    --output_dir out/mmslt
 
 ## Notes
-  
+
 - The `--nproc_per_node=4` flag specifies that the training will use 4 GPUs. Adjust this based on your available GPU resources. However, for exact reproducibility of the results, it is highly recommended to use 4 GPUs as specified.
 - Text sign descriptions and weight files in our [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
