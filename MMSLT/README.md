@@ -81,6 +81,10 @@ Before training, you must convert the raw LLaVA-generated text descriptions into
 3. Overwrites the same files with the enriched format: `{video_name: {'texts': [...], 'bert_feat': tensor}}`
 
 ```bash
+sudo apt install jupyter-core
+```
+
+```bash
 cd MMSLT && jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
 ```
 
