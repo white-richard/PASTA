@@ -284,9 +284,52 @@ def cosine_scheduler_func(base_value, final_value, iters, epochs):
     return schedule(iters)
 
 def load_dataset_file(filename):
-    with gzip.open(filename, "rb") as f:
-        loaded_object = pickle.load(f)
-        return loaded_object
+    # Try gzip+pickle first (original format), fall back to Phoenix CSV
+    try:
+        with gzip.open(filename, "rb") as f:
+            loaded_object = pickle.load(f)
+            return loaded_object
+    except (OSError, gzip.BadGzipFile):
+        pass
+
+    # Phoenix CSV format: pipe-delimited with columns name|video|start|end|speaker|orth|translation
+    import csv
+    import glob as _glob
+    data = {}
+    # Infer split from filename
+    fname = os.path.basename(filename)
+    if 'train' in fname:
+        split = 'train'
+    elif 'dev' in fname:
+        split = 'dev'
+    elif 'test' in fname:
+        split = 'test'
+    else:
+        split = 'train'
+
+    with open(filename, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="|")
+        for row in reader:
+            name = row["name"].strip()
+            translation = row["translation"].strip()
+            # video col: e.g. "VideoName/1/*.png" — extract folder name
+            video_col = row["video"].strip()
+            video_name = video_col.split("/")[0]
+            # Expand glob relative to the image root (two levels up from annotations/manual)
+            annotations_dir = os.path.dirname(os.path.abspath(filename))
+            img_root = os.path.join(annotations_dir, "..", "..", "features", "fullFrame-210x260px")
+            frame_dir = os.path.join(img_root, split, video_name)
+            frames = sorted(_glob.glob(os.path.join(frame_dir, "*.png")))
+            if not frames:
+                continue
+            rel_frames = ["/" + os.path.relpath(f, img_root) for f in frames]
+            key = f"{split}/{video_name}"
+            data[key] = {
+                "name": name,
+                "text": translation,
+                "imgs_path": rel_frames,
+            }
+    return data
 
 def build_vocab(file_path,UNK_IDX,specials_symbols):
     vocab = build_vocab_from_iterator(yield_tokens(file_path), specials=specials_symbols,min_freq=1)
@@ -307,7 +350,7 @@ def concat_all_gather(tensor):
     tensors_gather = [torch.ones_like(tensor)
         for _ in range(torch.distributed.get_world_size())]
     torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-    
+
     output = torch.cat(tensors_gather,dim=0)
     return output
 
@@ -367,7 +410,7 @@ def NoiseInjecting(raw_gloss, noise_rate=0.15, noise_type='omit_last', random_sh
                         noise_gloss.append(WORD_MASK)
             else:
                 noise_gloss = [d for d in text]
-        
+
         if is_train and random_shuffle and random.uniform(0, 1) > 0.5:
             random.shuffle(noise_gloss) # random shuffle sequence
 
@@ -416,7 +459,7 @@ def ctc_decode(gloss_probabilities,sgn_lengths):
             tmp_gloss_sequences[dense_idx[0]].append(
                 ctc_decode.values[value_idx].numpy()
             )
-    
+
     decoded_gloss_sequences = []
     for seq_idx in range(0, len(tmp_gloss_sequences)):
         decoded_gloss_sequences.append(
@@ -465,11 +508,11 @@ class TemporalRescale(object):
 #             ax = fig.add_subplot()
 #             att = torch.softmax(att, dim=-1)
 #             sns.heatmap(att.detach().cpu().numpy(), annot=False, yticklabels=False, xticklabels=False, fmt='g', ax=ax)
-            
+
 #             fig.savefig(os.path.join('./demo', f'Att_score_{ii}.jpg'), dpi=fig.dpi)
 #             plt.close()
 #             continue
-        
+
 #         for cmp in att:
 #             ax = fig.add_subplot(*idx)
 #             sns.heatmap(cmp.detach().cpu().numpy(), cbar=idx[-1] % idx[-2] == 0, annot=False, yticklabels=False, xticklabels=False, fmt='g', ax=ax)
@@ -523,7 +566,7 @@ class KLLoss(torch.nn.Module):
         probs2 = F.softmax(label * 10, 1)
         loss = self.error_metric(probs1, probs2) * batch_size
         return loss
-        
+
 def loss_fn_kd(outputs, teacher_outputs, T=1.0, alpha=0.5):
     """
     Compute the knowledge-distillation (KD) loss given outputs, labels.
@@ -594,7 +637,7 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    # torch.backends.cudnn.enabled = False  
+    # torch.backends.cudnn.enabled = False
 
 def save_dataset_file(path, data):
     with gzip.open(path, "w") as f:
