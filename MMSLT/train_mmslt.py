@@ -611,8 +611,6 @@ def train_one_epoch(
         if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
             utils.visualization(model.module.visualize())
             
-        break # DELETE
-
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -670,7 +668,6 @@ def evaluate(
 
             if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
                 utils.visualization(model_without_ddp.visualize())
-            break # DELETE
 
     pad_tensor = torch.ones(200 - len(tgt_pres[0])).to(device)
     tgt_pres[0] = torch.cat((tgt_pres[0], pad_tensor.long()), dim=0)
