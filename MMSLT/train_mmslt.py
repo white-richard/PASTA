@@ -13,6 +13,11 @@ from collections import OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 import hpargparse
 import numpy as np
 import test as test
@@ -31,7 +36,6 @@ from loguru import logger
 # *user-defined
 from models import MMSLT
 from sacrebleu.metrics import BLEU
-from torch.nn.utils.rnn import pad_sequence
 from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
 
@@ -198,12 +202,12 @@ def get_args_parser():
     parser.add_argument(
         "--dist-eval", action="store_true", default=False, help="Enabling distributed evaluation"
     )
-    parser.add_argument("--num_workers", default=16, type=int)
+    parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument(
         "--eval_num_workers",
-        default=4,
+        default=1,
         type=int,
-        help="Number of DataLoader workers for dev/test evaluation dataloaders. "
+        help="Number of DataLoader workers for dev/test evaluation dataloaders. ",
     )
     parser.add_argument(
         "--pin-mem",
@@ -213,6 +217,11 @@ def get_args_parser():
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
     parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
+    parser.add_argument(
+        "--log-memory",
+        action="store_true",
+        help="Log process/CUDA memory periodically.",
+    )
 
     # *Drop out params
     parser.add_argument(
@@ -286,34 +295,45 @@ def main(args, config):
         dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
         test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
 
-    train_dataloader = DataLoader(
-        train_data,
+    pin_mem = bool(args.pin_mem and args.device.startswith("cuda"))
+
+    train_loader_kwargs = dict(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         collate_fn=train_data.collate_fn,
         sampler=train_sampler if args.distributed else None,
         shuffle=(args.distributed is False),
-        pin_memory=args.pin_mem,
+        pin_memory=pin_mem,
     )
+    if args.num_workers > 0:
+        train_loader_kwargs["prefetch_factor"] = 2
+        train_loader_kwargs["persistent_workers"] = True
+
+    eval_loader_kwargs = dict(
+        batch_size=args.batch_size,
+        num_workers=args.eval_num_workers,
+        pin_memory=pin_mem,
+    )
+    if args.eval_num_workers > 0:
+        eval_loader_kwargs["prefetch_factor"] = 1
+        eval_loader_kwargs["persistent_workers"] = False
+
+    train_dataloader = DataLoader(train_data, **train_loader_kwargs)
 
     dev_dataloader = DataLoader(
         dev_data,
-        batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
         collate_fn=dev_data.collate_fn,
         sampler=dev_sampler if args.distributed else None,
         shuffle=(args.distributed is False),
-        pin_memory=args.pin_mem,
+        **eval_loader_kwargs,
     )
 
     test_dataloader = DataLoader(
         test_data,
-        batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
         collate_fn=test_data.collate_fn,
         sampler=test_sampler if args.distributed else None,
         shuffle=(args.distributed is False),
-        pin_memory=args.pin_mem,
+        **eval_loader_kwargs,
     )
 
     print("Creating model:")
@@ -524,7 +544,7 @@ def main(args, config):
         if not test_model_path.exists():
             test_model_path = output_dir / "checkpoint.pth"
             print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
-        checkpoint = torch.load(test_model_path , map_location="cpu")
+        checkpoint = torch.load(test_model_path, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
 
         test_stats = evaluate(
@@ -610,7 +630,7 @@ def train_one_epoch(
 
         if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
             utils.visualization(model.module.visualize())
-            
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -635,24 +655,18 @@ def evaluate(
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = "Test:"
+    tgt_pres = []
+    tgt_refs = []
 
     with torch.no_grad():
-        tgt_pres = []
-        tgt_refs = []
-
         for step, (src_input, tgt_input) in enumerate(
             metric_logger.log_every(dev_dataloader, 10, header)
         ):
             out_logits = model(src_input, tgt_input)
-            total_loss = 0.0
             label = tgt_input["input_ids"].reshape(-1)
-
             logits = out_logits.reshape(-1, out_logits.shape[-1])
             tgt_loss = criterion(logits, label.to(device))
-
-            total_loss += tgt_loss
-
-            metric_logger.update(loss=total_loss.item())
+            metric_logger.update(loss=tgt_loss.item())
 
             output = model_without_ddp.generate(
                 src_input,
@@ -660,34 +674,31 @@ def evaluate(
                 num_beams=8,
                 forced_bos_token_id=tokenizer.lang_code_to_id["de_DE"],
             )
+            pred_texts = tokenizer.batch_decode(output.detach().cpu(), skip_special_tokens=True)
+            ref_texts = tokenizer.batch_decode(tgt_input["input_ids"], skip_special_tokens=True)
+            tgt_pres.extend(pred_texts)
+            tgt_refs.extend(ref_texts)
 
-            tgt_input["input_ids"] = tgt_input["input_ids"].to(device)
-            for i in range(len(output)):
-                tgt_pres.append(output[i, :])
-                tgt_refs.append(tgt_input["input_ids"][i, :])
+            if args.log_memory and utils.is_main_process() and ((step + 1) % 20 == 0):
+                rss_gb = "N/A"
+                if psutil is not None:
+                    rss_gb = f"{psutil.Process(os.getpid()).memory_info().rss / (1024**3):.2f} GB"
+                if torch.cuda.is_available():
+                    alloc_gb = torch.cuda.memory_allocated(device) / (1024**3)
+                    reserved_gb = torch.cuda.memory_reserved(device) / (1024**3)
+                    print(
+                        f"[memory] step={step + 1} rss={rss_gb} cuda_alloc={alloc_gb:.2f} GB cuda_reserved={reserved_gb:.2f} GB"
+                    )
+                else:
+                    print(f"[memory] step={step + 1} rss={rss_gb}")
 
             if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
                 utils.visualization(model_without_ddp.visualize())
 
-    pad_tensor = torch.ones(200 - len(tgt_pres[0])).to(device)
-    tgt_pres[0] = torch.cat((tgt_pres[0], pad_tensor.long()), dim=0)
-
-    tgt_pres = pad_sequence(tgt_pres, batch_first=True, padding_value=PAD_IDX)
-
-    pad_tensor = torch.ones(200 - len(tgt_refs[0])).to(device)
-    tgt_refs[0] = torch.cat((tgt_refs[0], pad_tensor.long()), dim=0)
-    tgt_refs = pad_sequence(tgt_refs, batch_first=True, padding_value=PAD_IDX)
-
-    tgt_pres = tokenizer.batch_decode(tgt_pres, skip_special_tokens=True)
-    tgt_refs = tokenizer.batch_decode(tgt_refs, skip_special_tokens=True)
-
     bleu = BLEU()
     bleu_s = bleu.corpus_score(tgt_pres, [tgt_refs]).score
-    # metrics_dict['belu4']=bleu_s
-
     metric_logger.meters["belu4"].update(bleu_s)
 
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print(f"* BELU-4 {metric_logger.belu4.global_avg:.3f} loss {metric_logger.loss.global_avg:.3f}")
 

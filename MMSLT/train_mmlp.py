@@ -7,6 +7,7 @@ import math
 # *basic
 import os
 import random
+import resource
 import sys
 import time
 from collections.abc import Iterable
@@ -185,12 +186,29 @@ def get_args_parser():
     parser.add_argument("--resume", default="", help="resume from checkpoint")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
-    parser.add_argument("--num_workers", default=16, type=int)
+    parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument(
         "--eval_num_workers",
         default=4,
         type=int,
-        help="Number of DataLoader workers for dev/test evaluation dataloaders. "
+        help="Number of DataLoader workers for dev/test evaluation dataloaders. ",
+    )
+    parser.add_argument(
+        "--prefetch_factor",
+        default=2,
+        type=int,
+        help="Number of prefetched batches per worker for training dataloader.",
+    )
+    parser.add_argument(
+        "--eval_prefetch_factor",
+        default=1,
+        type=int,
+        help="Number of prefetched batches per worker for eval dataloaders.",
+    )
+    parser.add_argument(
+        "--log-memory",
+        action="store_true",
+        help="Log CPU/GPU memory stats at epoch boundaries.",
     )
     parser.add_argument(
         "--pin-mem",
@@ -258,15 +276,19 @@ def main(args, config):
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True)
 
     def make_train_dataloader():
-        return DataLoader(
-            train_data,
+        train_loader_kwargs = dict(
+            dataset=train_data,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             collate_fn=train_data.collate_fn,
             sampler=train_sampler,
             pin_memory=args.pin_mem,
             drop_last=True,
+            persistent_workers=args.num_workers > 0,
         )
+        if args.num_workers > 0:
+            train_loader_kwargs["prefetch_factor"] = args.prefetch_factor
+        return DataLoader(**train_loader_kwargs)
 
     dev_data = S2T_Dataset(
         path=config["data"]["label_path"],
@@ -277,14 +299,18 @@ def main(args, config):
     )
     print(dev_data)
     dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
-    dev_dataloader = DataLoader(
-        dev_data,
+    dev_loader_kwargs = dict(
+        dataset=dev_data,
         batch_size=args.batch_size,
         num_workers=args.eval_num_workers,
         collate_fn=dev_data.collate_fn,
         sampler=dev_sampler,
         pin_memory=args.pin_mem,
+        persistent_workers=False,
     )
+    if args.eval_num_workers > 0:
+        dev_loader_kwargs["prefetch_factor"] = args.eval_prefetch_factor
+    dev_dataloader = DataLoader(**dev_loader_kwargs)
 
     test_data = S2T_Dataset(
         path=config["data"]["label_path"],
@@ -295,14 +321,18 @@ def main(args, config):
     )
     print(test_data)
     test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
-    test_dataloader = DataLoader(
-        test_data,
+    test_loader_kwargs = dict(
+        dataset=test_data,
         batch_size=args.batch_size,
         num_workers=args.eval_num_workers,
         collate_fn=test_data.collate_fn,
         sampler=test_sampler,
         pin_memory=args.pin_mem,
+        persistent_workers=False,
     )
+    if args.eval_num_workers > 0:
+        test_loader_kwargs["prefetch_factor"] = args.eval_prefetch_factor
+    test_dataloader = DataLoader(**test_loader_kwargs)
 
     print("Creating model:")
     model = MMLP(config=config)
@@ -369,6 +399,7 @@ def main(args, config):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
+        log_memory(args, f"epoch_{epoch}_start")
 
         # Recreate each epoch so that when training finishes the DataLoader and
         # all its worker processes are garbage-collected before evaluation
@@ -380,6 +411,7 @@ def main(args, config):
         )
         # Explicitly delete so worker processes are reaped before eval.
         del train_dataloader
+        log_memory(args, f"epoch_{epoch}_after_train_loader_delete")
         lr_scheduler.step(epoch)
 
         if args.output_dir:
@@ -434,6 +466,7 @@ def main(args, config):
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
+        log_memory(args, f"epoch_{epoch}_end")
 
     # Last epoch
     test_on_last_epoch = True
@@ -536,6 +569,31 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
     print(f"* DEV loss {metric_logger.loss.global_avg:.3f}")
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+
+def log_memory(args, tag):
+    if not getattr(args, "log_memory", False):
+        return
+
+    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        rss_mb = rss_kb / (1024 * 1024)
+    else:
+        rss_mb = rss_kb / 1024
+
+    msg = f"[memory] {tag} rss_max_mb={rss_mb:.2f}"
+
+    if torch.cuda.is_available():
+        allocated_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+        reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
+        max_allocated_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+        msg += (
+            f" cuda_allocated_mb={allocated_mb:.2f}"
+            f" cuda_reserved_mb={reserved_mb:.2f}"
+            f" cuda_max_allocated_mb={max_allocated_mb:.2f}"
+        )
+
+    print(msg)
 
 
 def setup_run(args, config):
