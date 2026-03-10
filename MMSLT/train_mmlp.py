@@ -191,9 +191,6 @@ def get_args_parser():
         default=4,
         type=int,
         help="Number of DataLoader workers for dev/test evaluation dataloaders. "
-        "Keeping this lower than --num_workers avoids OOM: train workers are "
-        "still alive when eval starts, so running full eval workers on top "
-        "exhausts RAM and the OOM killer fires.",
     )
     parser.add_argument(
         "--pin-mem",

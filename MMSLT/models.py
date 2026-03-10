@@ -153,6 +153,7 @@ class MMSLT(nn.Module):
             task_type="SEQ_2_SEQ_LM",
         )
         self.mbart = get_peft_model(self.mbart, lora_config)
+        self.mbart.generation_config.max_length = None
 
         self.backbone = resnet()
         # Description mapper

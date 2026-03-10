@@ -198,7 +198,13 @@ def get_args_parser():
     parser.add_argument(
         "--dist-eval", action="store_true", default=False, help="Enabling distributed evaluation"
     )
-    parser.add_argument("--num_workers", default=32, type=int)
+    parser.add_argument("--num_workers", default=16, type=int)
+    parser.add_argument(
+        "--eval_num_workers",
+        default=4,
+        type=int,
+        help="Number of DataLoader workers for dev/test evaluation dataloaders. "
+    )
     parser.add_argument(
         "--pin-mem",
         action="store_true",
@@ -206,7 +212,7 @@ def get_args_parser():
     )
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
-    parser.add_argument("--config", type=str, default="./configs/config_mmslt.yaml")
+    parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
 
     # *Drop out params
     parser.add_argument(
@@ -293,7 +299,7 @@ def main(args, config):
     dev_dataloader = DataLoader(
         dev_data,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        num_workers=args.eval_num_workers,
         collate_fn=dev_data.collate_fn,
         sampler=dev_sampler if args.distributed else None,
         shuffle=(args.distributed is False),
@@ -303,7 +309,7 @@ def main(args, config):
     test_dataloader = DataLoader(
         test_data,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
+        num_workers=args.eval_num_workers,
         collate_fn=test_data.collate_fn,
         sampler=test_sampler if args.distributed else None,
         shuffle=(args.distributed is False),
@@ -367,6 +373,8 @@ def main(args, config):
     ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
 
     output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"output_dir: {output_dir}")
     if args.resume:
         print("Resuming Model Parameters... ")
         checkpoint = torch.load(args.resume, map_location="cpu")
@@ -512,7 +520,11 @@ def main(args, config):
     # Last epoch
     test_on_last_epoch = True
     if test_on_last_epoch and args.output_dir:
-        checkpoint = torch.load(args.output_dir + "/best_checkpoint.pth", map_location="cpu")
+        test_model_path = output_dir / "best_checkpoint.pth"
+        if not test_model_path.exists():
+            test_model_path = output_dir / "checkpoint.pth"
+            print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
+        checkpoint = torch.load(test_model_path , map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
 
         test_stats = evaluate(
@@ -598,6 +610,8 @@ def train_one_epoch(
 
         if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
             utils.visualization(model.module.visualize())
+            
+        break # DELETE
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -656,6 +670,7 @@ def evaluate(
 
             if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
                 utils.visualization(model_without_ddp.visualize())
+            break # DELETE
 
     pad_tensor = torch.ones(200 - len(tgt_pres[0])).to(device)
     tgt_pres[0] = torch.cat((tgt_pres[0], pad_tensor.long()), dim=0)
