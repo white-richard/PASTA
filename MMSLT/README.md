@@ -16,12 +16,14 @@ tar xzf phoenix-2014-T.v3.tar.gz
 cd ..
 ```
 
-You'll need to download the video description labels using the google drive link at the bottom. Move them into this dir: `datasets/phoenix-descript`
+You'll need to download the video description labels from [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link). Move them into this dir: `datasets/phoenix-descript`
 
+```txt
 datasets/phoenix-descript
 ├── phoenix_SLdescriptions.dev
 ├── phoenix_SLdescriptions.test
 └── phoenix_SLdescriptions.train
+```
 
 CSL requires a formal request; use Phoenix for reproducibility verification.
 
@@ -48,7 +50,7 @@ git commit -am 'Relax gensim requirement to >=4.0.1 for Python 3.10 compatibilit
 cd ..
 ```
 
-### 4. Install PyTorch (CUDA 12.1) and Flash Attention
+### 4. Install PyTorch and Flash Attention
 
 ```bash
 uv pip install torch==2.4.1+cu121 torchaudio==2.4.1+cu121 torchvision==0.19.1+cu121 \
@@ -82,7 +84,7 @@ Before training, you must convert the raw LLaVA-generated text descriptions into
 3. Overwrites the same files with the enriched format: `{video_name: {'texts': [...], 'bert_feat': tensor}}`
 
 ```bash
-cd ~/.code/asl-llm/MMSLT && LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/python3.10/site-packages/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
+cd ~/.code/asl-llm/MMSLT && jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
 ```
 
 ---
@@ -91,43 +93,44 @@ cd ~/.code/asl-llm/MMSLT && LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/
 
 To train the MMLP (MultiModal Language Processing) model, run the following command:
 
-    CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
-
-    --nproc_per_node=4 \
-    --master_port=1234 \
-    --use_env train_mmlp.py \
-    --batch-size 4 \
-    --epochs 80 \
-    --opt adamw \
-    --lr 1e-4 \
-    --output_dir pretrain_models/mmlp \
-    --nproc_per_node 1
-
 ```bash
-LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/python3.10/site-packages/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH \
 CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
-  --nproc_per_node=1 --master_port=1234 --use_env train_mmlp.py \
-  --batch-size 4 --epochs 80 --opt adamw --lr 1e-4 --output_dir pretrain_models/mmlp
+--nproc_per_node=1 \
+--master_port=1234 \
+--use_env train_mmlp.py \
+--batch-size 4 \
+--epochs 80 \
+--opt adamw \
+--lr 1e-4 \
+--output_dir pretrain_models/mmlp \
 ```
 
 ---
 
-### 2. **MMSLT Training**
+### 3. **MMSLT Training**
 
 To fine-tune the MMSLT (MultiModal Spoken Language Translation) model, run the following command:
 
-    CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
-    --nproc_per_node=4 \
-    --master_port=1234 \
-    --use_env train_mmslt.py \
-    --batch-size 2 \
-    --epochs 200 \
-    --opt adamw \
-    --lr 1e-4 \
-    --finetune pretrain_models/mmlp/best_checkpoint.pth \
-    --output_dir out/mmslt
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
+--nproc_per_node=1 \
+--master_port=1234 \
+--use_env train_mmslt.py \
+--batch-size 2 \
+--epochs 200 \
+--opt adamw \
+--lr 1e-4 \
+--finetune pretrain_models/mmlp/best_checkpoint.pth \
+--output_dir out/mmslt
+```
 
 ## Notes
 
 - The `--nproc_per_node=4` flag specifies that the training will use 4 GPUs. Adjust this based on your available GPU resources. However, for exact reproducibility of the results, it is highly recommended to use 4 GPUs as specified.
 - Text sign descriptions and weight files in our [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
+
+Ignore this
+
+```bash
+LD_LIBRARY_PATH=/home/richw/.code/asl-llm/.venv/lib/python3.10/site-packages/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH
+```
