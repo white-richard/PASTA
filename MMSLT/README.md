@@ -57,7 +57,7 @@ uv pip install --upgrade pip setuptools wheel packaging ninja
 
 uv pip install torch torchvision torchaudio \
   --index-url https://download.pytorch.org/whl/cu124
-  
+
 uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 
 uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
@@ -86,11 +86,29 @@ cd MMSLT && jupyter nbconvert --to notebook --execute --inplace descript_embed.i
 
 ---
 
+### 2. Reproduce author's results
+
+Reproduce the authors results using the following bash script:
+This trains the MMLP then MMSLT using the paper's hyperparameters
+
+```bash
+cd MMSLT
+bash reproduce_author.bash
+```
+
+## Notes
+
+- The `--nproc_per_node=4` flag specifies that the training will use 4 GPUs. Adjust this based on your available GPU resources. However, for exact reproducibility of the results, it is highly recommended to use 4 GPUs as specified.
+- Text sign descriptions and weight files in our [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
+
+# DEPRICATED INSTRUCTIONS
+
 ### 2. **MMLP Training**
 
 To train the MMLP (MultiModal Language Processing) model, run the following command:
 
 We should be in the MMSLT dir for training:
+
 ```bash
 cd MMSLT
 ```
@@ -125,8 +143,3 @@ CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
 --finetune pretrain_models/mmlp/best_checkpoint.pth \
 --output_dir out/mmslt
 ```
-
-## Notes
-
-- The `--nproc_per_node=4` flag specifies that the training will use 4 GPUs. Adjust this based on your available GPU resources. However, for exact reproducibility of the results, it is highly recommended to use 4 GPUs as specified.
-- Text sign descriptions and weight files in our [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
