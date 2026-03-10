@@ -13,6 +13,7 @@ uv.lock
 .claude
 datasets/
 .zed
+MMSLT/pretrain_models/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
