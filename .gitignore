@@ -16,6 +16,8 @@ datasets/
 MMSLT/pretrain_models/
 MMSLT/nlg-eval-temp/
 out/
+pretrain_models/
+nlg-eval-temp/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
