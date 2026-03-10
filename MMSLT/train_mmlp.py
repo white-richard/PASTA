@@ -218,6 +218,11 @@ def get_args_parser():
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
     parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
+    parser.add_argument(
+        "--debug_mode",
+        action="store_true",
+        help="Run in debug mode: only 1 epoch and 2 batches per epoch.",
+    )
 
     # * data process params
     parser.add_argument("--input-size", default=224, type=int)
@@ -393,6 +398,10 @@ def main(args, config):
         )
         return
 
+    if args.debug_mode:
+        print("DEBUG MODE: limiting to 1 epoch.")
+        args.epochs = args.start_epoch + 1
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     min_loss = np.inf
@@ -515,6 +524,9 @@ def train_one_epoch(
     for step, (src_input, tgt_input) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header)
     ):
+        if args.debug_mode and step >= 2:
+            print("DEBUG MODE: stopping after 2 batches.")
+            break
         optimizer.zero_grad()
         with torch.amp.autocast("cuda"):
             sim_text, sim_image, descript_loss = model(src_input, tgt_input)

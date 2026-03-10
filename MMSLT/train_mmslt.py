@@ -238,6 +238,13 @@ def get_args_parser():
     # * visualization
     parser.add_argument("--visualize", action="store_true")
 
+    # * debug
+    parser.add_argument(
+        "--debug_mode",
+        action="store_true",
+        help="Run in debug mode: only 1 epoch and 2 batches per split.",
+    )
+
     return parser
 
 
@@ -448,6 +455,10 @@ def main(args, config):
         )
         return
 
+    if args.debug_mode:
+        print("*** DEBUG MODE: overriding epochs to 1 ***")
+        args.epochs = args.start_epoch + 1
+
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
@@ -544,7 +555,7 @@ def main(args, config):
         if not test_model_path.exists():
             test_model_path = output_dir / "checkpoint.pth"
             print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
-        checkpoint = torch.load(test_model_path, map_location="cpu")
+        checkpoint = torch.load(test_model_path, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
 
         test_stats = evaluate(
@@ -631,6 +642,10 @@ def train_one_epoch(
         if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
             utils.visualization(model.module.visualize())
 
+        if args.debug_mode and step >= 1:
+            print("*** DEBUG MODE: stopping after 2 batches ***")
+            break
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
@@ -694,6 +709,10 @@ def evaluate(
 
             if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
                 utils.visualization(model_without_ddp.visualize())
+
+            if args.debug_mode and step >= 1:
+                print("*** DEBUG MODE: stopping after 2 batches ***")
+                break
 
     bleu = BLEU()
     bleu_s = bleu.corpus_score(tgt_pres, [tgt_refs]).score
