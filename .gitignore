@@ -13,8 +13,6 @@ uv.lock
 .claude
 datasets/
 .zed
-MMSLT/pretrain_models/
-MMSLT/nlg-eval-temp/
 out/
 pretrain_models/
 nlg-eval-temp/
