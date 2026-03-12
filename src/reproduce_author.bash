@@ -8,12 +8,32 @@ MASTER_PORT=1234
 RUN_TRAIN_MMLP=${RUN_TRAIN_MMLP:-1}
 RUN_TRAIN_MMSLT=${RUN_TRAIN_MMSLT:-1}
 
+DEBUG_MODE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -d|--debug)
+      DEBUG_MODE=1
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      echo "Usage: $0 [--debug|-d]"
+      exit 1
+      ;;
+  esac
+done
+
 run_dist () {
   local script="$1"; shift
+  local extra_args=("$@")
+  if [[ "${DEBUG_MODE}" -eq 1 ]]; then
+    extra_args+=(--debug_mode)
+  fi
+
   torchrun \
     --nproc_per_node=1 \
     --master_port="${MASTER_PORT}" \
-    "${script}" "$@"
+    "${script}" "${extra_args[@]}"
 }
 
 if [[ "${RUN_TRAIN_MMLP}" -eq 1 ]]; then
