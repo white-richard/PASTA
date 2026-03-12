@@ -7,55 +7,60 @@ import math
 # *basic
 import os
 import random
-import resource
 import sys
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
 
 import hpargparse
 import numpy as np
+import test as test
 
 # from sched import scheduler
 import torch
 import torch.backends.cudnn as cudnn
+import torch.nn as nn
 import utils as utils
 import wandb
 import yaml
-
-# global definition
-from definition import *
+from datasets_csl import S2T_CSLDataset
 from hpman.m import _
 from loguru import logger
 
 # *metric
 # *user-defined
-from models import MMLP
-
-# *timm
-from timm.optim import create_optimizer
-from timm.scheduler import create_scheduler
-from timm.utils import NativeScaler
-from torch import nn
+from models import MMSLT
+from sacrebleu.metrics import BLEU
+from torch.nn.utils.rnn import pad_sequence
+from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
 
-# visualization
 # *transformers
 from transformers import (
     MBart50TokenizerFast,
 )
 
-from datasets import S2T_Dataset
+try:
+    from nlgeval import compute_metrics
+except:
+    print("Please install nlgeval package.")
+
+# *timm
+# global definition
+from definition import *
+from timm.optim import create_optimizer
+from timm.utils import NativeScaler
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
-        "Multimodal-Language-Pre-training (MMLP) scripts", add_help=False
+        "LLaVA-guided Sign Language Translation script", add_help=False
     )
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument("--epochs", default=80, type=int)
 
-    # distributed training parameters
+    # * distributed training parameters
     parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
     parser.add_argument(
         "--dist_url", default="env://", help="url used to set up distributed training"
@@ -82,7 +87,7 @@ def get_args_parser():
         type=float,
         nargs="+",
         metavar="BETA",  # [0.9, 0.98]
-        help="Optimizer Betas (default: [0.9, 0.98], use opt default)",
+        help="Optimizer Betas (default: None, use opt default)",
     )
     parser.add_argument(
         "--clip-grad",
@@ -95,7 +100,10 @@ def get_args_parser():
         "--momentum", type=float, default=0.9, metavar="M", help="SGD momentum (default: 0.9)"
     )
     parser.add_argument(
-        "--weight-decay", type=float, default=0.2, help="weight decay (default: 0.05)"
+        "--weight-decay",
+        type=float,
+        default=0.001,  # 0.001 is original
+        help="weight decay (default: 0.05)",
     )
 
     # * Learning rate schedule parameters
@@ -182,34 +190,14 @@ def get_args_parser():
     # * Baise params
     parser.add_argument("--output_dir", default="", help="path where to save, empty for no saving")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
-    parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
-    parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument(
-        "--eval_num_workers",
-        default=4,
-        type=int,
-        help="Number of DataLoader workers for dev/test evaluation dataloaders. ",
+        "--dist-eval", action="store_true", default=False, help="Enabling distributed evaluation"
     )
-    parser.add_argument(
-        "--prefetch_factor",
-        default=2,
-        type=int,
-        help="Number of prefetched batches per worker for training dataloader.",
-    )
-    parser.add_argument(
-        "--eval_prefetch_factor",
-        default=1,
-        type=int,
-        help="Number of prefetched batches per worker for eval dataloaders.",
-    )
-    parser.add_argument(
-        "--log-memory",
-        action="store_true",
-        help="Log CPU/GPU memory stats at epoch boundaries.",
-    )
+    parser.add_argument("--num_workers", default=32, type=int)
     parser.add_argument(
         "--pin-mem",
         action="store_true",
@@ -217,39 +205,28 @@ def get_args_parser():
     )
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
-    parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
+    parser.add_argument("--config", type=str, default="./configs/config_mmslt_csl.yaml")
+
+    # *Drop out params
     parser.add_argument(
-        "--debug_mode",
-        action="store_true",
-        help="Run in debug mode: only 1 epoch and 2 batches per epoch.",
+        "--drop", type=float, default=0.0, metavar="PCT", help="Dropout rate (default: 0.)"
+    )
+    parser.add_argument(
+        "--drop-path", type=float, default=0.1, metavar="PCT", help="Drop path rate (default: 0.1)"
     )
 
     # * data process params
     parser.add_argument("--input-size", default=224, type=int)
     parser.add_argument("--resize", default=256, type=int)
 
-    # * wandb params
-    parser.add_argument(
-        "--log_all",
-        action="store_true",
-        help="flag to log in all processes, otherwise only in rank0",
-    )
-    parser.add_argument(
-        "--entity",
-        type=str,
-        help="wandb entity",
-    )
-    parser.add_argument(
-        "--project",
-        type=str,
-        default="",
-        help="wandb project",
-    )
+    # * visualization
+    parser.add_argument("--visualize", action="store_true")
 
     return parser
 
 
 def main(args, config):
+    # torch.multiprocessing.set_start_method('spawn')
     utils.init_distributed_mode(args)
     print(args)
 
@@ -260,17 +237,17 @@ def main(args, config):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    cudnn.benchmark = False  # Since the input dim is dynamic.
+    cudnn.benchmark = False
 
     print("Creating dataset:")
     tokenizer = MBart50TokenizerFast.from_pretrained(
         "facebook/mbart-large-50-many-to-many-mmt",
-        src_lang="de_DE",
-        tgt_lang="de_DE",
+        src_lang="zh_CN",
+        tgt_lang="zh_CN",
         model_max_length=1024,
     )
 
-    train_data = S2T_Dataset(
+    train_data = S2T_CSLDataset(
         path=config["data"]["label_path"],
         tokenizer=tokenizer,
         config=config,
@@ -278,24 +255,8 @@ def main(args, config):
         phase="train",
     )
     print(train_data)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True)
 
-    def make_train_dataloader():
-        train_loader_kwargs = dict(
-            dataset=train_data,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            collate_fn=train_data.collate_fn,
-            sampler=train_sampler,
-            pin_memory=args.pin_mem,
-            drop_last=True,
-            persistent_workers=args.num_workers > 0,
-        )
-        if args.num_workers > 0:
-            train_loader_kwargs["prefetch_factor"] = args.prefetch_factor
-        return DataLoader(**train_loader_kwargs)
-
-    dev_data = S2T_Dataset(
+    dev_data = S2T_CSLDataset(
         path=config["data"]["label_path"],
         tokenizer=tokenizer,
         config=config,
@@ -303,21 +264,8 @@ def main(args, config):
         phase="dev",
     )
     print(dev_data)
-    dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
-    dev_loader_kwargs = dict(
-        dataset=dev_data,
-        batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
-        collate_fn=dev_data.collate_fn,
-        sampler=dev_sampler,
-        pin_memory=args.pin_mem,
-        persistent_workers=False,
-    )
-    if args.eval_num_workers > 0:
-        dev_loader_kwargs["prefetch_factor"] = args.eval_prefetch_factor
-    dev_dataloader = DataLoader(**dev_loader_kwargs)
 
-    test_data = S2T_Dataset(
+    test_data = S2T_CSLDataset(
         path=config["data"]["label_path"],
         tokenizer=tokenizer,
         config=config,
@@ -325,32 +273,77 @@ def main(args, config):
         phase="test",
     )
     print(test_data)
-    test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
-    test_loader_kwargs = dict(
-        dataset=test_data,
+
+    if args.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True)
+        dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
+        test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
+
+    train_dataloader = DataLoader(
+        train_data,
         batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
-        collate_fn=test_data.collate_fn,
-        sampler=test_sampler,
+        num_workers=args.num_workers,
+        collate_fn=train_data.collate_fn,
+        sampler=train_sampler if args.distributed else None,
+        shuffle=(args.distributed is False),
         pin_memory=args.pin_mem,
-        persistent_workers=False,
     )
-    if args.eval_num_workers > 0:
-        test_loader_kwargs["prefetch_factor"] = args.eval_prefetch_factor
-    test_dataloader = DataLoader(**test_loader_kwargs)
+
+    dev_dataloader = DataLoader(
+        dev_data,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        collate_fn=dev_data.collate_fn,
+        sampler=dev_sampler if args.distributed else None,
+        shuffle=(args.distributed is False),
+        pin_memory=args.pin_mem,
+    )
+
+    test_dataloader = DataLoader(
+        test_data,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        collate_fn=test_data.collate_fn,
+        sampler=test_sampler if args.distributed else None,
+        shuffle=(args.distributed is False),
+        pin_memory=args.pin_mem,
+    )
 
     print("Creating model:")
-    model = MMLP(config=config)
+
+    model = MMSLT(config, args)
     model.to(device)
-    print(model)
 
     if args.finetune:
-        checkpoint = torch.load(args.finetune, map_location="cpu")
-        ret = model.load_state_dict(checkpoint["model"], strict=False)
+        print("***********************************")
+        print("Load parameters for Visual Encoder...")
+        print("***********************************")
+        state_dict = torch.load(args.finetune, map_location="cpu")
+        new_state_dict = OrderedDict()
+        for k, v in state_dict["model"].items():
+            if "model_image.backbone" in k:
+                k = "backbone." + ".".join(k.split(".")[2:])
+                new_state_dict[k] = v
+            if "trans_encoder" in k:
+                k = "mbart.base_model.model.model.encoder." + ".".join(k.split(".")[4:])
+                new_state_dict[k] = v
+            if "model_image.conv" in k:
+                k = "conv." + ".".join(k.split(".")[2:])
+                new_state_dict[k] = v
+            if "projector" in k:
+                k = "projector." + ".".join(k.split(".")[2:])
+                new_state_dict[k] = v
+            if "descriptproj" in k:
+                k = "descriptproj." + ".".join(k.split(".")[2:])
+                new_state_dict[k] = v
+
+        ret = model.load_state_dict(new_state_dict, strict=False)
         print("Missing keys: \n", "\n".join(ret.missing_keys))
         print("Unexpected keys: \n", "\n".join(ret.unexpected_keys))
 
+    # print(model)
     model_without_ddp = model
+
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(
@@ -360,16 +353,21 @@ def main(args, config):
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
 
-    # create optimizer and scheduler
     optimizer = create_optimizer(args, model_without_ddp)
     print(optimizer)
-    lr_scheduler, _ = create_scheduler(args, optimizer)
 
-    criterion = torch.nn.CrossEntropyLoss()
+    lr_scheduler = scheduler.CosineAnnealingLR(
+        optimizer=optimizer,
+        eta_min=1e-8,
+        T_max=args.epochs,
+    )
     loss_scaler = NativeScaler()
+
+    ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
 
     output_dir = Path(args.output_dir)
     if args.resume:
+        print("Resuming Model Parameters... ")
         checkpoint = torch.load(args.resume, map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
         if (
@@ -387,43 +385,61 @@ def main(args, config):
             logger.warning(
                 "Please specify the trained model: --resume /path/to/best_checkpoint.pth"
             )
-        dev_stats = evaluate(args, dev_dataloader, model, criterion, args.start_epoch)
-        print(
-            f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}"
+        test_stats = evaluate(
+            args,
+            dev_dataloader,
+            model,
+            model_without_ddp,
+            tokenizer,
+            ce_criterion,
+            config,
+            UNK_IDX,
+            SPECIAL_SYMBOLS,
+            PAD_IDX,
+            device,
         )
-
-        test_stats = evaluate(args, test_dataloader, model, criterion, args.start_epoch)
         print(
-            f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}"
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} "
+        )
+        test_stats = evaluate(
+            args,
+            test_dataloader,
+            model,
+            model_without_ddp,
+            tokenizer,
+            ce_criterion,
+            config,
+            UNK_IDX,
+            SPECIAL_SYMBOLS,
+            PAD_IDX,
+            device,
+        )
+        print(
+            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}"
         )
         return
 
-    if args.debug_mode:
-        print("DEBUG MODE: limiting to 1 epoch.")
-        args.epochs = args.start_epoch + 1
-
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    min_loss = np.inf
+    max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        log_memory(args, f"epoch_{epoch}_start")
 
-        # Recreate each epoch so that when training finishes the DataLoader and
-        # all its worker processes are garbage-collected before evaluation
-        # starts.  Without this, 16 train workers + eval workers exhaust RAM
-        # and the OOM killer fires at the first eval batch.
-        train_dataloader = make_train_dataloader()
         train_stats = train_one_epoch(
-            args, model, criterion, train_dataloader, optimizer, device, epoch, config, loss_scaler
+            args,
+            model,
+            ce_criterion,
+            train_dataloader,
+            optimizer,
+            device,
+            epoch,
+            config,
+            loss_scaler,
         )
-        # Explicitly delete so worker processes are reaped before eval.
-        del train_dataloader
-        log_memory(args, f"epoch_{epoch}_after_train_loader_delete")
         lr_scheduler.step(epoch)
 
-        if args.output_dir:
+        if args.output_dir and utils.is_main_process():
             checkpoint_paths = [output_dir / "checkpoint.pth"]
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master(
@@ -436,11 +452,26 @@ def main(args, config):
                     checkpoint_path,
                 )
 
-        test_stats = evaluate(args, dev_dataloader, model, criterion, epoch)
+        test_stats = evaluate(
+            args,
+            dev_dataloader,
+            model,
+            model_without_ddp,
+            tokenizer,
+            ce_criterion,
+            config,
+            UNK_IDX,
+            SPECIAL_SYMBOLS,
+            PAD_IDX,
+            device,
+        )
+        print(
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}"
+        )
 
-        if min_loss > test_stats["loss"]:
-            min_loss = test_stats["loss"]
-            if args.output_dir:
+        if max_accuracy < test_stats["belu4"]:
+            max_accuracy = test_stats["belu4"]
+            if args.output_dir and utils.is_main_process():
                 checkpoint_paths = [output_dir / "best_checkpoint.pth"]
                 for checkpoint_path in checkpoint_paths:
                     utils.save_on_master(
@@ -449,19 +480,20 @@ def main(args, config):
                             "optimizer": optimizer.state_dict(),
                             "lr_scheduler": lr_scheduler.state_dict(),
                             "epoch": epoch,
-                            # 'args': args,
+                            "args": args,
                         },
                         checkpoint_path,
                     )
 
-        print(f"* DEV loss {test_stats['loss']:.3f} Min DEV loss {min_loss}")
+        print(f"Max BELU-4: {max_accuracy:.2f}%")
         if utils.is_main_process():
             wandb.log(
                 {
                     "epoch": epoch + 1,
                     "training/train_loss": train_stats["loss"],
                     "dev/dev_loss": test_stats["loss"],
-                    "dev/min_loss": min_loss,
+                    "dev/Bleu_4": test_stats["belu4"],
+                    "dev/Best_Bleu_4": max_accuracy,
                 }
             )
 
@@ -475,23 +507,45 @@ def main(args, config):
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
-        log_memory(args, f"epoch_{epoch}_end")
 
     # Last epoch
     test_on_last_epoch = True
     if test_on_last_epoch and args.output_dir:
-        torch.distributed.barrier()
         checkpoint = torch.load(args.output_dir + "/best_checkpoint.pth", map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
 
-        dev_stats = evaluate(args, dev_dataloader, model, criterion, epoch)
+        test_stats = evaluate(
+            args,
+            dev_dataloader,
+            model,
+            model_without_ddp,
+            tokenizer,
+            ce_criterion,
+            config,
+            UNK_IDX,
+            SPECIAL_SYMBOLS,
+            PAD_IDX,
+            device,
+        )
         print(
-            f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}"
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}"
         )
 
-        test_stats = evaluate(args, test_dataloader, model, criterion, epoch)
+        test_stats = evaluate(
+            args,
+            test_dataloader,
+            model,
+            model_without_ddp,
+            tokenizer,
+            ce_criterion,
+            config,
+            UNK_IDX,
+            SPECIAL_SYMBOLS,
+            PAD_IDX,
+            device,
+        )
         print(
-            f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}"
+            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}"
         )
 
     total_time = time.time() - start_time
@@ -502,7 +556,7 @@ def main(args, config):
 def train_one_epoch(
     args,
     model: torch.nn.Module,
-    criterion: nn.CrossEntropyLoss,
+    ce_criterion: nn.CrossEntropyLoss,
     data_loader: Iterable,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
@@ -518,33 +572,31 @@ def train_one_epoch(
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = f"Epoch: [{epoch}/{args.epochs}]"
     print_freq = 10
-    loss_t = criterion
-    loss_i = criterion
 
     for step, (src_input, tgt_input) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header)
     ):
-        if args.debug_mode and step >= 2:
-            print("DEBUG MODE: stopping after 2 batches.")
-            break
-        optimizer.zero_grad()
-        with torch.amp.autocast("cuda"):
-            sim_text, sim_image, descript_loss = model(src_input, tgt_input)
-            loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
-            loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
-            total_loss = ((loss_text + loss_image) / 2.0) + (0.1 * descript_loss)
-        loss_scaler(total_loss, optimizer)
+        out_logits = model(src_input, tgt_input)
+        label = tgt_input["input_ids"].reshape(-1)
+        logits = out_logits.reshape(-1, out_logits.shape[-1])
+        ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
 
-        loss_value = total_loss.item()
+        optimizer.zero_grad()
+        ce_loss.backward()
+        optimizer.step()
+
+        loss_value = ce_loss.item()
+
         if not math.isfinite(loss_value):
             print(f"Loss is {loss_value}, stopping training")
             sys.exit(1)
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        metric_logger.update(lr_llm=round(float(optimizer.param_groups[1]["lr"]), 8))
 
-    if args.run:
-        args.run.log({"epoch": epoch + 1, "epoch/train_loss": loss_value})
+        if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
+            utils.visualization(model.module.visualize())
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -553,98 +605,104 @@ def train_one_epoch(
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def evaluate(args, dev_dataloader, model, criterion, epoch):
+def evaluate(
+    args,
+    dev_dataloader,
+    model,
+    model_without_ddp,
+    tokenizer,
+    criterion,
+    config,
+    UNK_IDX,
+    SPECIAL_SYMBOLS,
+    PAD_IDX,
+    device,
+):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = "Test:"
-    print_freq = 10
-    loss_t = criterion
-    loss_i = criterion
 
     with torch.no_grad():
+        tgt_pres = []
+        tgt_refs = []
+
         for step, (src_input, tgt_input) in enumerate(
-            metric_logger.log_every(dev_dataloader, print_freq, header)
+            metric_logger.log_every(dev_dataloader, 10, header)
         ):
-            with torch.amp.autocast("cuda"):
-                sim_text, sim_image, descript_loss = model(src_input, tgt_input)
-                loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
-                loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
-                total_loss = ((loss_text + loss_image) / 2.0) + (0.1 * descript_loss)
+            out_logits = model(src_input, tgt_input)
+            total_loss = 0.0
+            label = tgt_input["input_ids"].reshape(-1)
+
+            logits = out_logits.reshape(-1, out_logits.shape[-1])
+            tgt_loss = criterion(logits, label.to(device))
+
+            total_loss += tgt_loss
 
             metric_logger.update(loss=total_loss.item())
 
-    if args.run:
-        args.run.log({"epoch": epoch + 1, "epoch/dev_loss": total_loss.item()})
-    metric_logger.synchronize_between_processes()
-    print("* Averaged stats:", metric_logger)
-    print(f"* DEV loss {metric_logger.loss.global_avg:.3f}")
-
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
-
-def log_memory(args, tag):
-    if not getattr(args, "log_memory", False):
-        return
-
-    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
-        rss_mb = rss_kb / (1024 * 1024)
-    else:
-        rss_mb = rss_kb / 1024
-
-    msg = f"[memory] {tag} rss_max_mb={rss_mb:.2f}"
-
-    if torch.cuda.is_available():
-        allocated_mb = torch.cuda.memory_allocated() / (1024 * 1024)
-        reserved_mb = torch.cuda.memory_reserved() / (1024 * 1024)
-        max_allocated_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
-        msg += (
-            f" cuda_allocated_mb={allocated_mb:.2f}"
-            f" cuda_reserved_mb={reserved_mb:.2f}"
-            f" cuda_max_allocated_mb={max_allocated_mb:.2f}"
-        )
-
-    print(msg)
-
-
-def setup_run(args, config):
-    if args.log_all:
-        os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
-        run = wandb.init(
-            entity=args.entity,
-            project=args.project,
-            group=args.output_dir.split("/")[-1],
-            config=config,
-        )
-        run.define_metric("epoch")
-        run.define_metric("training/*", step_metric="epoch")
-        run.define_metric("dev/*", step_metric="epoch")
-    else:
-        if utils.is_main_process():
-            os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
-            run = wandb.init(
-                entity=args.entity,
-                project=args.project,
-                config=config,
+            output = model_without_ddp.generate(
+                src_input,
+                max_new_tokens=150,
+                num_beams=8,
+                forced_bos_token_id=tokenizer.lang_code_to_id["zh_CN"],
             )
-            run.define_metric("epoch")
-            run.define_metric("training/*", step_metric="epoch")
-            run.define_metric("dev/*", step_metric="epoch")
-            run.name = args.output_dir.split("/")[-1]
-        else:
-            os.environ["WANDB_MODE"] = "disabled"
-            run = False
 
-    return run
+            tgt_input["input_ids"] = tgt_input["input_ids"].to(device)
+            for i in range(len(output)):
+                tgt_pres.append(output[i, :])
+                tgt_refs.append(tgt_input["input_ids"][i, :])
+
+            if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
+                utils.visualization(model_without_ddp.visualize())
+
+    pad_tensor = torch.ones(200 - len(tgt_pres[0])).to(device)
+    tgt_pres[0] = torch.cat((tgt_pres[0], pad_tensor.long()), dim=0)
+
+    tgt_pres = pad_sequence(tgt_pres, batch_first=True, padding_value=PAD_IDX)
+
+    pad_tensor = torch.ones(200 - len(tgt_refs[0])).to(device)
+    tgt_refs[0] = torch.cat((tgt_refs[0], pad_tensor.long()), dim=0)
+    tgt_refs = pad_sequence(tgt_refs, batch_first=True, padding_value=PAD_IDX)
+
+    tgt_pres = tokenizer.batch_decode(tgt_pres, skip_special_tokens=True)
+    tgt_refs = tokenizer.batch_decode(tgt_refs, skip_special_tokens=True)
+    # post-process with Chinese
+    tgt_pres = [" ".join(list(r)) for r in tgt_pres]
+    tgt_refs = [" ".join(list(r)) for r in tgt_refs]
+
+    bleu = BLEU()
+    bleu_s = bleu.corpus_score(tgt_pres, [tgt_refs]).score
+    # metrics_dict['belu4']=bleu_s
+
+    metric_logger.meters["belu4"].update(bleu_s)
+
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print(f"* BELU-4 {metric_logger.belu4.global_avg:.3f} loss {metric_logger.loss.global_avg:.3f}")
+
+    if utils.is_main_process() and utils.get_world_size() == 1 and args.eval:
+        with open(args.output_dir + "/tmp_pres.txt", "w") as f:
+            for i in range(len(tgt_pres)):
+                f.write(tgt_pres[i] + "\n")
+        with open(args.output_dir + "/tmp_refs.txt", "w") as f:
+            for i in range(len(tgt_refs)):
+                f.write(tgt_refs[i] + "\n")
+        print("\n" + "*" * 80)
+        metrics_dict = compute_metrics(
+            hypothesis=args.output_dir + "/tmp_pres.txt",
+            references=[args.output_dir + "/tmp_refs.txt"],
+            no_skipthoughts=True,
+            no_glove=True,
+        )
+        print("*" * 80)
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    parser = argparse.ArgumentParser(
-        "Multimodal-Language-Pretraining(MMLP) scripts", parents=[get_args_parser()]
-    )
+    parser = argparse.ArgumentParser("MMSLT script", parents=[get_args_parser()])
     _.parse_file(Path(__file__).resolve().parent)
     hpargparse.bind(parser, _)
     args = parser.parse_args()
@@ -652,9 +710,15 @@ if __name__ == "__main__":
     with open(args.config, "r+", encoding="utf-8") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
-    # wandb.init a run if logging, otherwise return None
-    args.run = setup_run(args, config)
+    os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
+    if utils.is_main_process():
+        wandb.init(project="", config=config)
+        wandb.run.name = args.output_dir.split("/")[-1]
+        wandb.define_metric("epoch")
+        wandb.define_metric("training/*", step_metric="epoch")
+        wandb.define_metric("dev/*", step_metric="epoch")
 
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
     main(args, config)
