@@ -1,3 +1,4 @@
+
 # *torch
 import argparse
 import datetime
@@ -566,6 +567,10 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
         for step, (src_input, tgt_input) in enumerate(
             metric_logger.log_every(dev_dataloader, print_freq, header)
         ):
+            if args.debug_mode and step >= 2:
+                print("DEBUG MODE: stopping after 2 batches.")
+                break
+            
             with torch.amp.autocast("cuda"):
                 sim_text, sim_image, descript_loss = model(src_input, tgt_input)
                 loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
