@@ -85,7 +85,9 @@ sudo apt install jupyter-core
 ```
 
 ```bash
-cd MMSLT && jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
+cd MMSLT
+jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
+cd ..
 ```
 
 ---
