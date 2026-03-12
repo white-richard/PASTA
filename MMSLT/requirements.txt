@@ -104,7 +104,7 @@ nbformat
 nest-asyncio
 networkx
 ninja
-nlg-eval @ git+file://./nlg-eval-temp@py310-patch
+./nlg-eval-temp
 nltk
 nose
 notebook
