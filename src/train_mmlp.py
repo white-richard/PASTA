@@ -1,4 +1,3 @@
-
 # *torch
 import argparse
 import datetime
@@ -20,18 +19,10 @@ import numpy as np
 # from sched import scheduler
 import torch
 import torch.backends.cudnn as cudnn
-import utils as utils
 import wandb
 import yaml
-
-# global definition
-from definition import *
 from hpman.m import _
 from loguru import logger
-
-# *metric
-# *user-defined
-from models import MMLP
 
 # *timm
 from timm.optim import create_optimizer
@@ -46,7 +37,15 @@ from transformers import (
     MBart50TokenizerFast,
 )
 
+import utils as utils
 from datasets import S2T_Dataset
+
+# global definition
+from definition import *
+
+# *metric
+# *user-defined
+from models import MMLP
 
 
 def get_args_parser():
@@ -570,7 +569,7 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
             if args.debug_mode and step >= 2:
                 print("DEBUG MODE: stopping after 2 batches.")
                 break
-            
+
             with torch.amp.autocast("cuda"):
                 sim_text, sim_image, descript_loss = model(src_input, tgt_input)
                 loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
