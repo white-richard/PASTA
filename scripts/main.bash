@@ -8,7 +8,7 @@ RUN_TRAIN_MMLP=${RUN_TRAIN_MMLP:-1}
 RUN_TRAIN_MMSLT=${RUN_TRAIN_MMSLT:-1}
 
 # Shared configs
-VISION_BACKBONE="resnet18"
+VISION_BACKBONE="resnet18" # resnet18 | vit_base_patch16_clip_224.openai
 DEBUG_MODE=0
 
 while [[ $# -gt 0 ]]; do
