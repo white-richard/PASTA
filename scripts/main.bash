@@ -8,7 +8,10 @@ MASTER_PORT=1234
 RUN_TRAIN_MMLP=${RUN_TRAIN_MMLP:-1}
 RUN_TRAIN_MMSLT=${RUN_TRAIN_MMSLT:-1}
 
+# Shared configs
+VISION_BACKBONE="resnet18"
 DEBUG_MODE=0
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d|--debug)
@@ -42,7 +45,8 @@ if [[ "${RUN_TRAIN_MMLP}" -eq 1 ]]; then
     --epochs 80 \
     --opt adamw \
     --lr 1e-4 \
-    --output_dir pretrain_models/mmlp
+    --output_dir pretrain_models/mmlp \
+    --vision_backbone "${VISION_BACKBONE}"
 else
     
   echo "[SKIP] train_mmlp.py (RUN_TRAIN_MMLP=0)"
@@ -55,7 +59,8 @@ if [[ "${RUN_TRAIN_MMSLT}" -eq 1 ]]; then
     --opt adamw \
     --lr 1e-4 \
     --finetune pretrain_models/mmlp/best_checkpoint.pth \
-    --output_dir out/mmslt
+    --output_dir out/mmslt \
+    --vision_backbone "${VISION_BACKBONE}"
 else
   echo "[SKIP] train_mmslt.py (RUN_TRAIN_MMSLT=0)"
 fi
