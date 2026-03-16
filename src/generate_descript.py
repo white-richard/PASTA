@@ -6,20 +6,20 @@ from collections import defaultdict
 
 import torch
 import torch.distributed as dist
-from llavaov import LLaVA
 from PIL import Image
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from datasets import MissDataset, VideoDataset
+from llavaov import LLaVA
 
 
-def setup(rank, world_size):
+def setup(rank, world_size) -> None:
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 
-def create_feature(args):
+def create_feature(args) -> None:
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     setup(rank, world_size)
@@ -81,7 +81,8 @@ def create_feature(args):
             start, end = idx[i : i + 2]
             frames = images[start:end]
 
-            texts = mmlm(images=frames)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                texts = mmlm(images=frames)
             vid_texts.extend(texts)
             # vid_lengths.extend(lengths)
 
@@ -93,11 +94,13 @@ def create_feature(args):
         if cnt % 100 == 0:  # save codebook in every 100 iteration (backup)
             if resume:
                 torch.save(
-                    text_dict, f"{save_path}phoenix_SLdescript.{split}_{rank}"
+                    text_dict,
+                    f"{save_path}phoenix_SLdescript.{split}_{rank}",
                 )  # train, dev, test
             else:
                 torch.save(
-                    text_dict, f"{save_path}phoenix_SLdescript.{split}_{rank}"
+                    text_dict,
+                    f"{save_path}phoenix_SLdescript.{split}_{rank}",
                 )  # train, dev, test
 
             print(f"Saving features in {cnt} iteraion..")
@@ -110,20 +113,20 @@ def create_feature(args):
     print("Saving features complete!")
 
 
-def cleanup():
+def cleanup() -> None:
     # Any cleanup code, e.g., free up CUDA memory
     torch.cuda.empty_cache()
     sys.exit(0)
 
 
-def signal_handler(sig, frame):
+def signal_handler(sig, frame) -> None:
     cleanup()
 
 
 signal.signal(signal.SIGINT, signal_handler)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     # parser.add_argument('--ngpus', type=int, default=1, help='number of gpus used')
     # parser.add_argument('--local_rank', type=int, default=0, help='rank of the current process')
@@ -135,12 +138,18 @@ def main():
     )
     parser.add_argument("--split", type=str, default="train", help="split")
     parser.add_argument(
-        "--frame_bs", type=int, default=8, help="batch size of frames for LLaVA input"
+        "--frame_bs",
+        type=int,
+        default=8,
+        help="batch size of frames for LLaVA input",
     )
     parser.add_argument("--video_bs", type=int, default=1)
     parser.add_argument("--resume", type=bool, default=False, help="resume generating features")
     parser.add_argument(
-        "--save_path", type=str, default="path/to/save/", help="path to save features"
+        "--save_path",
+        type=str,
+        default="path/to/save/",
+        help="path to save features",
     )
     args = parser.parse_args()
 

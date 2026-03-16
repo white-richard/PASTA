@@ -16,6 +16,7 @@ datasets/
 out/
 pretrain_models/
 nlg-eval-temp/
+CLAUDE.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

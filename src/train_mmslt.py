@@ -20,22 +20,16 @@ except ImportError:
 
 import hpargparse
 import numpy as np
-import test as test
 
 # from sched import scheduler
 import torch
-import torch.backends.cudnn as cudnn
-import torch.nn as nn
-import utils as utils
 import wandb
 import yaml
 from hpman.m import _
 from loguru import logger
-
-# *metric
-# *user-defined
-from models import MMSLT
 from sacrebleu.metrics import BLEU
+from torch import nn
+from torch.backends import cudnn
 from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
 
@@ -44,7 +38,12 @@ from transformers import (
     MBart50TokenizerFast,
 )
 
+import utils
 from datasets import S2T_Dataset
+
+# *metric
+# *user-defined
+from models import MMSLT
 
 try:
     from nlgeval import compute_metrics
@@ -53,14 +52,16 @@ except:
 
 # *timm
 # global definition
-from definition import *
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler
+
+from definition import *
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
-        "LLaVA-guided Sign Language Translation script", add_help=False
+        "LLaVA-guided Sign Language Translation script",
+        add_help=False,
     )
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument("--epochs", default=80, type=int)
@@ -68,7 +69,9 @@ def get_args_parser():
     # * distributed training parameters
     parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
     parser.add_argument(
-        "--dist_url", default="env://", help="url used to set up distributed training"
+        "--dist_url",
+        default="env://",
+        help="url used to set up distributed training",
     )
     parser.add_argument("--local_rank", default=0, type=int)
 
@@ -77,7 +80,11 @@ def get_args_parser():
 
     # * Optimizer parameters
     parser.add_argument(
-        "--opt", default="adamw", type=str, metavar="OPTIMIZER", help='Optimizer (default: "adamw"'
+        "--opt",
+        default="adamw",
+        type=str,
+        metavar="OPTIMIZER",
+        help='Optimizer (default: "adamw"',
     )
     parser.add_argument(
         "--opt-eps",
@@ -102,7 +109,11 @@ def get_args_parser():
         help="Clip gradient norm (default: None, no clipping)",
     )
     parser.add_argument(
-        "--momentum", type=float, default=0.9, metavar="M", help="SGD momentum (default: 0.9)"
+        "--momentum",
+        type=float,
+        default=0.9,
+        metavar="M",
+        help="SGD momentum (default: 0.9)",
     )
     parser.add_argument(
         "--weight-decay",
@@ -120,7 +131,11 @@ def get_args_parser():
         help='LR scheduler (default: "cosine"',
     )
     parser.add_argument(
-        "--lr", type=float, default=1.0e-3, metavar="LR", help="learning rate (default: 5e-4)"
+        "--lr",
+        type=float,
+        default=1.0e-3,
+        metavar="LR",
+        help="learning rate (default: 5e-4)",
     )
     parser.add_argument(
         "--lr-noise",
@@ -160,7 +175,11 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--decay-epochs", type=float, default=30, metavar="N", help="epoch interval to decay LR"
+        "--decay-epochs",
+        type=float,
+        default=30,
+        metavar="N",
+        help="epoch interval to decay LR",
     )
     parser.add_argument(
         "--warmup-epochs",
@@ -200,7 +219,10 @@ def get_args_parser():
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
     parser.add_argument(
-        "--dist-eval", action="store_true", default=False, help="Enabling distributed evaluation"
+        "--dist-eval",
+        action="store_true",
+        default=False,
+        help="Enabling distributed evaluation",
     )
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument(
@@ -225,10 +247,18 @@ def get_args_parser():
 
     # *Drop out params
     parser.add_argument(
-        "--drop", type=float, default=0.0, metavar="PCT", help="Dropout rate (default: 0.)"
+        "--drop",
+        type=float,
+        default=0.0,
+        metavar="PCT",
+        help="Dropout rate (default: 0.)",
     )
     parser.add_argument(
-        "--drop-path", type=float, default=0.1, metavar="PCT", help="Drop path rate (default: 0.1)"
+        "--drop-path",
+        type=float,
+        default=0.1,
+        metavar="PCT",
+        help="Drop path rate (default: 0.1)",
     )
 
     # * data process params
@@ -248,7 +278,7 @@ def get_args_parser():
     return parser
 
 
-def main(args, config):
+def main(args, config) -> None:
     # torch.multiprocessing.set_start_method('spawn')
     utils.init_distributed_mode(args)
     print(args)
@@ -304,23 +334,23 @@ def main(args, config):
 
     pin_mem = bool(args.pin_mem and args.device.startswith("cuda"))
 
-    train_loader_kwargs = dict(
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        collate_fn=train_data.collate_fn,
-        sampler=train_sampler if args.distributed else None,
-        shuffle=(args.distributed is False),
-        pin_memory=pin_mem,
-    )
+    train_loader_kwargs = {
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "collate_fn": train_data.collate_fn,
+        "sampler": train_sampler if args.distributed else None,
+        "shuffle": (args.distributed is False),
+        "pin_memory": pin_mem,
+    }
     if args.num_workers > 0:
         train_loader_kwargs["prefetch_factor"] = 2
         train_loader_kwargs["persistent_workers"] = True
 
-    eval_loader_kwargs = dict(
-        batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
-        pin_memory=pin_mem,
-    )
+    eval_loader_kwargs = {
+        "batch_size": args.batch_size,
+        "num_workers": args.eval_num_workers,
+        "pin_memory": pin_mem,
+    }
     if args.eval_num_workers > 0:
         eval_loader_kwargs["prefetch_factor"] = 1
         eval_loader_kwargs["persistent_workers"] = False
@@ -381,7 +411,9 @@ def main(args, config):
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=False
+            model,
+            device_ids=[args.gpu],
+            find_unused_parameters=False,
         )
         model_without_ddp = model.module
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
@@ -419,7 +451,7 @@ def main(args, config):
     if args.eval:
         if not args.resume:
             logger.warning(
-                "Please specify the trained model: --resume /path/to/best_checkpoint.pth"
+                "Please specify the trained model: --resume /path/to/best_checkpoint.pth",
             )
         test_stats = evaluate(
             args,
@@ -435,7 +467,7 @@ def main(args, config):
             device,
         )
         print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} "
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} ",
         )
         test_stats = evaluate(
             args,
@@ -451,7 +483,7 @@ def main(args, config):
             device,
         )
         print(
-            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}"
+            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
         )
         return
 
@@ -506,7 +538,7 @@ def main(args, config):
             device,
         )
         print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}"
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
         )
 
         if max_accuracy < test_stats["belu4"]:
@@ -534,7 +566,7 @@ def main(args, config):
                     "dev/dev_loss": test_stats["loss"],
                     "dev/Bleu_4": test_stats["belu4"],
                     "dev/Best_Bleu_4": max_accuracy,
-                }
+                },
             )
 
         log_stats = {
@@ -572,7 +604,7 @@ def main(args, config):
             device,
         )
         print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}"
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
         )
 
         test_stats = evaluate(
@@ -589,7 +621,7 @@ def main(args, config):
             device,
         )
         print(
-            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}"
+            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
         )
 
     total_time = time.time() - start_time
@@ -618,12 +650,13 @@ def train_one_epoch(
     print_freq = 10
 
     for step, (src_input, tgt_input) in enumerate(
-        metric_logger.log_every(data_loader, print_freq, header)
+        metric_logger.log_every(data_loader, print_freq, header),
     ):
-        out_logits = model(src_input, tgt_input)
-        label = tgt_input["input_ids"].reshape(-1)
-        logits = out_logits.reshape(-1, out_logits.shape[-1])
-        ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            out_logits = model(src_input, tgt_input)
+            label = tgt_input["input_ids"].reshape(-1)
+            logits = out_logits.reshape(-1, out_logits.shape[-1])
+            ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
 
         optimizer.zero_grad()
         ce_loss.backward()
@@ -675,20 +708,22 @@ def evaluate(
 
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
-            metric_logger.log_every(dev_dataloader, 10, header)
+            metric_logger.log_every(dev_dataloader, 10, header),
         ):
-            out_logits = model(src_input, tgt_input)
-            label = tgt_input["input_ids"].reshape(-1)
-            logits = out_logits.reshape(-1, out_logits.shape[-1])
-            tgt_loss = criterion(logits, label.to(device))
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                out_logits = model(src_input, tgt_input)
+                label = tgt_input["input_ids"].reshape(-1)
+                logits = out_logits.reshape(-1, out_logits.shape[-1])
+                tgt_loss = criterion(logits, label.to(device))
             metric_logger.update(loss=tgt_loss.item())
 
-            output = model_without_ddp.generate(
-                src_input,
-                max_new_tokens=150,
-                num_beams=8,
-                forced_bos_token_id=tokenizer.lang_code_to_id["de_DE"],
-            )
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                output = model_without_ddp.generate(
+                    src_input,
+                    max_new_tokens=150,
+                    num_beams=8,
+                    forced_bos_token_id=tokenizer.lang_code_to_id["de_DE"],
+                )
             pred_texts = tokenizer.batch_decode(output.detach().cpu(), skip_special_tokens=True)
             ref_texts = tokenizer.batch_decode(tgt_input["input_ids"], skip_special_tokens=True)
             tgt_pres.extend(pred_texts)
@@ -702,7 +737,7 @@ def evaluate(
                     alloc_gb = torch.cuda.memory_allocated(device) / (1024**3)
                     reserved_gb = torch.cuda.memory_reserved(device) / (1024**3)
                     print(
-                        f"[memory] step={step + 1} rss={rss_gb} cuda_alloc={alloc_gb:.2f} GB cuda_reserved={reserved_gb:.2f} GB"
+                        f"[memory] step={step + 1} rss={rss_gb} cuda_alloc={alloc_gb:.2f} GB cuda_reserved={reserved_gb:.2f} GB",
                     )
                 else:
                     print(f"[memory] step={step + 1} rss={rss_gb}")
@@ -723,13 +758,11 @@ def evaluate(
 
     if utils.is_main_process() and utils.get_world_size() == 1 and args.eval:
         with open(args.output_dir + "/tmp_pres.txt", "w") as f:
-            for i in range(len(tgt_pres)):
-                f.write(tgt_pres[i] + "\n")
+            f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
         with open(args.output_dir + "/tmp_refs.txt", "w") as f:
-            for i in range(len(tgt_refs)):
-                f.write(tgt_refs[i] + "\n")
+            f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
         print("\n" + "*" * 80)
-        metrics_dict = compute_metrics(
+        compute_metrics(
             hypothesis=args.output_dir + "/tmp_pres.txt",
             references=[args.output_dir + "/tmp_refs.txt"],
             no_skipthoughts=True,

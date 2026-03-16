@@ -1,3 +1,4 @@
+import contextlib
 import datetime
 import gzip
 import io
@@ -12,10 +13,8 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-try:
+with contextlib.suppress(BaseException):
     from torchtext.vocab import build_vocab_from_iterator
-except:
-    pass
 from itertools import groupby
 
 import matplotlib.pyplot as plt  # For graphics
@@ -31,7 +30,7 @@ class SmoothedValue:
     window or the global series average.
     """
 
-    def __init__(self, window_size=20, fmt=None):
+    def __init__(self, window_size=20, fmt=None) -> None:
         if fmt is None:
             fmt = "{median:.4f} ({global_avg:.4f})"
         self.deque = deque(maxlen=window_size)
@@ -39,15 +38,13 @@ class SmoothedValue:
         self.count = 0
         self.fmt = fmt
 
-    def update(self, value, n=1):
+    def update(self, value, n=1) -> None:
         self.deque.append(value)
         self.count += n
         self.total += value * n
 
-    def synchronize_between_processes(self):
-        """
-        Warning: does not synchronize the deque!
-        """
+    def synchronize_between_processes(self) -> None:
+        """Warning: does not synchronize the deque!"""
         if not is_dist_avail_and_initialized():
             return
         t = torch.tensor([self.count, self.total], dtype=torch.float64, device="cuda")
@@ -79,7 +76,7 @@ class SmoothedValue:
     def value(self):
         return self.deque[-1]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.fmt.format(
             median=self.median,
             avg=self.avg,
@@ -90,11 +87,11 @@ class SmoothedValue:
 
 
 class MetricLogger:
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\t") -> None:
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
 
-    def update(self, **kwargs):
+    def update(self, **kwargs) -> None:
         for k, v in kwargs.items():
             if isinstance(v, torch.Tensor):
                 v = v.item()
@@ -106,19 +103,20 @@ class MetricLogger:
             return self.meters[attr]
         if attr in self.__dict__:
             return self.__dict__[attr]
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{attr}'")
+        msg = f"'{type(self).__name__}' object has no attribute '{attr}'"
+        raise AttributeError(msg)
 
-    def __str__(self):
+    def __str__(self) -> str:
         loss_str = []
         for name, meter in self.meters.items():
-            loss_str.append(f"{name}: {str(meter)}")
+            loss_str.append(f"{name}: {meter!s}")
         return self.delimiter.join(loss_str)
 
-    def synchronize_between_processes(self):
+    def synchronize_between_processes(self) -> None:
         for meter in self.meters.values():
             meter.synchronize_between_processes()
 
-    def add_meter(self, name, meter):
+    def add_meter(self, name, meter) -> None:
         self.meters[name] = meter
 
     def log_every(self, iterable, print_freq, header=None):
@@ -159,7 +157,7 @@ class MetricLogger:
                             time=str(iter_time),
                             data=str(data_time),
                             memory=torch.cuda.max_memory_allocated() / MB,
-                        )
+                        ),
                     )
                 else:
                     print(
@@ -170,7 +168,7 @@ class MetricLogger:
                             meters=str(self),
                             time=str(iter_time),
                             data=str(data_time),
-                        )
+                        ),
                     )
             i += 1
             end = time.time()
@@ -186,25 +184,21 @@ def count_parameters_in_MB(model):
     )
 
 
-def _load_checkpoint_for_ema(model_ema, checkpoint):
-    """
-    Workaround for ModelEma._load_checkpoint to accept an already-loaded object
-    """
+def _load_checkpoint_for_ema(model_ema, checkpoint) -> None:
+    """Workaround for ModelEma._load_checkpoint to accept an already-loaded object."""
     mem_file = io.BytesIO()
     torch.save(checkpoint, mem_file)
     mem_file.seek(0)
     model_ema._load_checkpoint(mem_file)
 
 
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
+def setup_for_distributed(is_master) -> None:
+    """This function disables printing when not in master process."""
     import builtins as __builtin__
 
     builtin_print = __builtin__.print
 
-    def print(*args, **kwargs):
+    def print(*args, **kwargs) -> None:
         force = kwargs.pop("force", False)
         if is_master or force:
             builtin_print(*args, **kwargs)
@@ -212,12 +206,10 @@ def setup_for_distributed(is_master):
     __builtin__.print = print
 
 
-def is_dist_avail_and_initialized():
+def is_dist_avail_and_initialized() -> bool:
     if not dist.is_available():
         return False
-    if not dist.is_initialized():
-        return False
-    return True
+    return dist.is_initialized()
 
 
 def get_world_size():
@@ -236,12 +228,12 @@ def is_main_process():
     return get_rank() == 0
 
 
-def save_on_master(*args, **kwargs):
+def save_on_master(*args, **kwargs) -> None:
     if is_main_process():
         torch.save(*args, **kwargs)
 
 
-def init_distributed_mode(args):
+def init_distributed_mode(args) -> None:
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ["WORLD_SIZE"])
@@ -271,34 +263,38 @@ def init_distributed_mode(args):
 
 def sampler_func(clip, sn, random_choice=True):
     if random_choice:
-        f = lambda n: [
-            (lambda n, arr: n if arr == [] else np.random.choice(arr))(
-                n * i / sn, range(int(n * i / sn), max(int(n * i / sn) + 1, int(n * (i + 1) / sn)))
-            )
-            for i in range(sn)
-        ]
+
+        def f(n):
+            return [
+                (lambda n, arr: n if arr == [] else np.random.choice(arr))(
+                    n * i / sn,
+                    range(int(n * i / sn), max(int(n * i / sn) + 1, int(n * (i + 1) / sn))),
+                )
+                for i in range(sn)
+            ]
     else:
-        f = lambda n: [
-            (lambda n, arr: n if arr == [] else int(np.mean(arr)))(
-                n * i / sn, range(int(n * i / sn), max(int(n * i / sn) + 1, int(n * (i + 1) / sn)))
-            )
-            for i in range(sn)
-        ]
+
+        def f(n):
+            return [
+                (lambda n, arr: n if arr == [] else int(np.mean(arr)))(
+                    n * i / sn,
+                    range(int(n * i / sn), max(int(n * i / sn) + 1, int(n * (i + 1) / sn))),
+                )
+                for i in range(sn)
+            ]
+
     return f(clip)
 
 
 def cosine_scheduler(base_value, final_value, epochs):
     iters = np.arange(epochs)
-    schedule = final_value + 0.5 * (base_value - final_value) * (
-        1 + np.cos(np.pi * iters / len(iters))
-    )
-    return schedule
+    return final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
 
 
 def cosine_scheduler_func(base_value, final_value, iters, epochs):
-    schedule = lambda x: (
-        final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * x / epochs))
-    )
+    def schedule(x):
+        return final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * x / epochs))
+
     return schedule(iters)
 
 
@@ -306,8 +302,7 @@ def load_dataset_file(filename):
     # Try gzip+pickle first (original format), fall back to Phoenix CSV
     try:
         with gzip.open(filename, "rb") as f:
-            loaded_object = pickle.load(f)
-            return loaded_object
+            return pickle.load(f)
     except (OSError, gzip.BadGzipFile):
         pass
 
@@ -354,7 +349,9 @@ def load_dataset_file(filename):
 
 def build_vocab(file_path, UNK_IDX, specials_symbols):
     vocab = build_vocab_from_iterator(
-        yield_tokens(file_path), specials=specials_symbols, min_freq=1
+        yield_tokens(file_path),
+        specials=specials_symbols,
+        min_freq=1,
     )
     vocab.set_default_index(UNK_IDX)
     return vocab
@@ -368,15 +365,13 @@ def yield_tokens(file_path):
 
 @torch.no_grad()
 def concat_all_gather(tensor):
-    """
-    Performs all_gather operation on the provided tensors.
+    """Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
     """
     tensors_gather = [torch.ones_like(tensor) for _ in range(torch.distributed.get_world_size())]
     torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
 
-    output = torch.cat(tensors_gather, dim=0)
-    return output
+    return torch.cat(tensors_gather, dim=0)
 
 
 def gloss_tokens_to_sequences(tokens, tgt_vocab, type="tensor"):
@@ -387,36 +382,41 @@ def gloss_tokens_to_sequences(tokens, tgt_vocab, type="tensor"):
             sequence = " ".join(sequence)
             sequences.append(sequence)
         return sequences
-    else:
-        tokens = tokens.transpose(0, 1)
-        sequences = []
-        for i in range(len(tokens)):
-            token = tokens[i, :].tolist()
-            for j1 in range(len(token)):
-                if token[j1] == PAD_IDX:
-                    token = token[0:j1]
-                    break
-                if j1 == len(token) - 1:
-                    token = token[0:j1]
-            sequence = tgt_vocab.lookup_tokens(token)
-            sequence = " ".join(sequence)
-            sequences.append(sequence)
-        return sequences
+    tokens = tokens.transpose(0, 1)
+    sequences = []
+    for i in range(len(tokens)):
+        token = tokens[i, :].tolist()
+        for j1 in range(len(token)):
+            if token[j1] == PAD_IDX:
+                token = token[0:j1]
+                break
+            if j1 == len(token) - 1:
+                token = token[0:j1]
+        sequence = tgt_vocab.lookup_tokens(token)
+        sequence = " ".join(sequence)
+        sequences.append(sequence)
+    return sequences
 
 
 def NoiseInjecting(
-    raw_gloss, noise_rate=0.15, noise_type="omit_last", random_shuffle=False, is_train=True
+    raw_gloss,
+    noise_rate=0.15,
+    noise_type="omit_last",
+    random_shuffle=False,
+    is_train=True,
 ):
     new_gloss = []
 
-    for ii, gloss in enumerate(raw_gloss):
+    for _ii, gloss in enumerate(raw_gloss):
         text = gloss.split()
 
         if noise_type == "omit":
             # del noise
             if random.uniform(0, 1) <= 1.0 and is_train:
                 index = sampler_func(
-                    len(text), int(len(text) * (1.0 - noise_rate)), random_choice=is_train
+                    len(text),
+                    int(len(text) * (1.0 - noise_rate)),
+                    random_choice=is_train,
                 )
                 noise_gloss = []
                 noise_idx = []
@@ -427,7 +427,7 @@ def NoiseInjecting(
                         noise_gloss.append(WORD_MASK)
                         noise_idx.append(i)
             else:
-                noise_gloss = [d for d in text]
+                noise_gloss = list(text)
 
         elif noise_type == "omit_last":
             if random.uniform(0, 1) <= 1.0 and is_train:
@@ -444,7 +444,7 @@ def NoiseInjecting(
                     else:
                         noise_gloss.append(WORD_MASK)
             else:
-                noise_gloss = [d for d in text]
+                noise_gloss = list(text)
 
         if is_train and random_shuffle and random.uniform(0, 1) > 0.5:
             random.shuffle(noise_gloss)  # random shuffle sequence
@@ -455,7 +455,7 @@ def NoiseInjecting(
 
 def GlossPadding(input_ids, gt_gloss, attention_mask):
     new_input_ids, new_gt_gloss, new_mask = [], [], []
-    for NG, TG, MASK in zip(input_ids, gt_gloss, attention_mask):
+    for NG, TG, MASK in zip(input_ids, gt_gloss, attention_mask, strict=False):
         if len(NG) > len(TG):
             while len(NG) != len(TG):
                 TG.append(1)
@@ -496,7 +496,7 @@ def ctc_decode(gloss_probabilities, sgn_lengths):
             tmp_gloss_sequences[dense_idx[0]].append(ctc_decode.values[value_idx].numpy())
 
     decoded_gloss_sequences = []
-    for seq_idx in range(0, len(tmp_gloss_sequences)):
+    for seq_idx in range(len(tmp_gloss_sequences)):
         decoded_gloss_sequences.append([x[0] for x in groupby(tmp_gloss_sequences[seq_idx])])
     return decoded_gloss_sequences
 
@@ -514,7 +514,7 @@ def data_augmentation(resize=(320, 240), crop_size=224, is_train=True):
 
 
 class TemporalRescale:
-    def __init__(self, temp_scaling=0.2):
+    def __init__(self, temp_scaling=0.2) -> None:
         self.min_len = 32
         self.max_len = 300
         self.L = 1.0 - temp_scaling
@@ -523,10 +523,8 @@ class TemporalRescale:
     def __call__(self, clip):
         vid_len = len(clip)
         new_len = int(vid_len * (self.L + (self.U - self.L) * np.random.random()))
-        if new_len < self.min_len:
-            new_len = self.min_len
-        if new_len > self.max_len:
-            new_len = self.max_len
+        new_len = max(new_len, self.min_len)
+        new_len = min(new_len, self.max_len)
         if (new_len - 4) % 4 != 0:
             new_len += 4 - (new_len - 4) % 4
         if new_len <= vid_len:
@@ -560,7 +558,7 @@ class TemporalRescale:
 #         plt.close()
 
 
-def visualization(atten_maps):
+def visualization(atten_maps) -> None:
     os.makedirs("./demo", exist_ok=True)
     for ii, att in enumerate(atten_maps):
         B, T, T = att.shape[1], att.shape[2], att.shape[3]  # 배치 크기, 프레임 수, 프레임 수
@@ -599,13 +597,15 @@ class KLLoss(torch.nn.Module):
     """Loss that uses a 'hinge' on the lower bound.
     This means that for samples with a label value smaller than the threshold, the loss is zero if the prediction is
     also smaller than that threshold.
-    args:
+
+    Args:
         error_matric:  What base loss to use (MSE by default).
         threshold:  Threshold to use for the hinge.
         clip:  Clip the loss if it is above this value.
+
     """
 
-    def __init__(self, error_metric=torch.nn.KLDivLoss(size_average=True, reduce=True)):
+    def __init__(self, error_metric=torch.nn.KLDivLoss(size_average=True, reduce=True)) -> None:
         super().__init__()
         print("=========using KL Loss=and has temperature and * bz==========")
         self.error_metric = error_metric
@@ -614,39 +614,42 @@ class KLLoss(torch.nn.Module):
         batch_size = prediction.shape[0]
         probs1 = F.log_softmax(prediction, 1)
         probs2 = F.softmax(label * 10, 1)
-        loss = self.error_metric(probs1, probs2) * batch_size
-        return loss
+        return self.error_metric(probs1, probs2) * batch_size
 
 
 def loss_fn_kd(outputs, teacher_outputs, T=1.0, alpha=0.5):
-    """
-    Compute the knowledge-distillation (KD) loss given outputs, labels.
+    """Compute the knowledge-distillation (KD) loss given outputs, labels.
     "Hyperparameters": temperature and alpha
     NOTE: the KL Divergence for PyTorch comparing the softmaxs of teacher
-    and student expects the input tensor to be log probabilities! See Issue #2
+    and student expects the input tensor to be log probabilities! See Issue #2.
     """
-    KD_loss = torch.nn.KLDivLoss(reduction="sum")(
-        F.log_softmax(outputs / T, dim=1), F.softmax(teacher_outputs / T, dim=1)
+    return torch.nn.KLDivLoss(reduction="sum")(
+        F.log_softmax(outputs / T, dim=1),
+        F.softmax(teacher_outputs / T, dim=1),
     ) * (T * T)  # + \
     #    F.cross_entropy(outputs, F.softmax(teacher_outputs, dim=1)) * (1. - alpha)
-
-    return KD_loss
 
 
 class NativeScaler:
     state_dict_key = "amp_scaler"
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._scaler = torch.cuda.amp.GradScaler()
 
     def __call__(
-        self, loss, optimizer, clip_grad=None, clip_mode="norm", parameters=None, create_graph=False
+        self,
+        loss,
+        optimizer,
+        clip_grad=None,
+        clip_mode="norm",
+        parameters=None,
+        create_graph=False,
     ):
         self._scaler.scale(loss).backward(create_graph=create_graph)
         if clip_grad is not None:
             assert parameters is not None
             self._scaler.unscale_(
-                optimizer
+                optimizer,
             )  # unscale the gradients of optimizer's assigned params in-place
             dispatch_clip_grad(parameters, clip_grad, mode=clip_mode)
         self._scaler.step(optimizer)
@@ -655,7 +658,7 @@ class NativeScaler:
     def state_dict(self):
         return self._scaler.state_dict()
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict) -> None:
         self._scaler.load_state_dict(state_dict)
 
 
@@ -672,7 +675,9 @@ def InputMask(gloss_input_ids, gloss_attention_mask, noise_rate=0.1, is_train=Tr
         mask_matrix[i, :].scatter_(0, torch.tensor(index, device=mask_matrix.device), 0)
     gloss_attention_mask *= mask_matrix.cuda().type(torch.int)
     gloss_input_ids = torch.where(
-        mask_matrix == 0, torch.ones_like(gloss_input_ids), gloss_input_ids
+        mask_matrix == 0,
+        torch.ones_like(gloss_input_ids),
+        gloss_input_ids,
     )
     # print(gloss_input_ids, gloss_attention_mask)
 
@@ -693,7 +698,7 @@ class Dict(dict):
     # __getattr__ = lambda d, k: d.get(k, '')  # dict.k  ==>  dict.get(k,default)
 
 
-def set_seed(seed):
+def set_seed(seed) -> None:
     random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
     np.random.seed(seed)
@@ -705,7 +710,7 @@ def set_seed(seed):
     # torch.backends.cudnn.enabled = False
 
 
-def save_dataset_file(path, data):
+def save_dataset_file(path, data) -> None:
     with gzip.open(path, "w") as f:
         pickle.dump(data, f)
 

@@ -4,18 +4,19 @@ import random
 import cv2
 import numpy as np
 import torch
-import utils as utils
-from definition import *
 from PIL import Image
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 from torchvision import transforms
 from vidaug import augmentors as va
 
+import utils
+from definition import *
+
 
 # Datasets for Generating Descriptions
 class VideoDataset(Dataset):
-    def __init__(self, arg_dict, phase):
+    def __init__(self, arg_dict, phase) -> None:
 
         # self.image_processor = image_processor
         self.arg_dict = arg_dict
@@ -29,7 +30,7 @@ class VideoDataset(Dataset):
         assert self.feat_path is not None
         self.name_to_idx = {name: idx for idx, name in enumerate(self.video_names)}
 
-    def __len__(self):
+    def __len__(self) -> int:
 
         return len(self.video_names)
 
@@ -41,8 +42,8 @@ class VideoDataset(Dataset):
             [
                 os.path.join(frames_dir, f)
                 for f in os.listdir(frames_dir)
-                if f.endswith(".png") or f.endswith(".jpg")
-            ]
+                if f.endswith((".png", ".jpg"))
+            ],
         )
 
         return vid_name, frame_files
@@ -53,7 +54,7 @@ class VideoDataset(Dataset):
 
 
 class MissDataset(Dataset):
-    def __init__(self, arg_dict, phase):
+    def __init__(self, arg_dict, phase) -> None:
 
         self.arg_dict = arg_dict
         self.feat_path = arg_dict.get("img_path") + phase
@@ -64,10 +65,10 @@ class MissDataset(Dataset):
         ]
         assert self.feat_path is not None
         self.videos = torch.load(f"resume_path.{phase}")
-        self.keys = [k for k in self.videos.keys()]
+        self.keys = list(self.videos.keys())
         self.filtered = [name for name in self.video_names if name not in self.keys]
 
-    def __len__(self):
+    def __len__(self) -> int:
 
         return len(self.filtered)
 
@@ -79,8 +80,8 @@ class MissDataset(Dataset):
             [
                 os.path.join(frames_dir, f)
                 for f in os.listdir(frames_dir)
-                if f.endswith(".png") or f.endswith(".jpg")
-            ]
+                if f.endswith((".png", ".jpg"))
+            ],
         )
 
         return vid_name, frame_files
@@ -90,7 +91,7 @@ class MissDataset(Dataset):
 
 
 class S2T_Dataset(Dataset):
-    def __init__(self, path, tokenizer, config, args, phase):
+    def __init__(self, path, tokenizer, config, args, phase) -> None:
         self.config = config
         self.args = args
 
@@ -99,16 +100,20 @@ class S2T_Dataset(Dataset):
         self.phase = phase
         # self.descript_feat = torch.load(config["data"]["descript_feat_path"][phase])
         self.descript_feat = torch.load(
-            config["data"]["descript_feat_path"][phase], weights_only=False
+            config["data"]["descript_feat_path"][phase],
+            weights_only=False,
         )
         self.max_length = config["data"]["max_length"]
         self.img_path = config["data"]["img_path"]
 
         self.list = [key for key, value in self.raw_data.items()]
 
-        sometimes = lambda aug: va.Sometimes(
-            0.5, aug
-        )  # Used to apply augmentor with 50% probability
+        def sometimes(aug):
+            return va.Sometimes(
+                0.5,
+                aug,
+            )  # Used to apply augmentor with 50% probability
+
         self.seq = va.Sequential(
             [
                 sometimes(va.RandomRotate(30)),
@@ -116,10 +121,10 @@ class S2T_Dataset(Dataset):
                 sometimes(va.RandomTranslate(x=10, y=10)),
                 # sometimes(va.Brightness(min=0.1, max=1.5)),
                 # sometimes(va.Color(min=0.1, max=1.5)),
-            ]
+            ],
         )
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.raw_data)
 
     def __getitem__(self, index):
@@ -140,7 +145,7 @@ class S2T_Dataset(Dataset):
             [
                 transforms.ToTensor(),
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ]
+            ],
         )
         if len(paths) > self.max_length:
             tmp = sorted(random.sample(range(len(paths)), k=self.max_length))
@@ -170,7 +175,10 @@ class S2T_Dataset(Dataset):
             img_resized = img.resize(resize)
             img_tensor = data_transform(img_resized).unsqueeze(0)
             imgs[i, :, :, :] = img_tensor[
-                :, :, crop_rect[1] : crop_rect[3], crop_rect[0] : crop_rect[2]
+                :,
+                :,
+                crop_rect[1] : crop_rect[3],
+                crop_rect[0] : crop_rect[2],
             ]
 
         return imgs
@@ -236,7 +244,10 @@ class S2T_Dataset(Dataset):
         img_padding_mask = (mask_gen != PAD_IDX).long()
 
         tgt_input = self.tokenizer(
-            text_target=tgt_batch, return_tensors="pt", padding=True, truncation=True
+            text_target=tgt_batch,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
         )
 
         src_input = {}
@@ -250,5 +261,5 @@ class S2T_Dataset(Dataset):
 
         return src_input, tgt_input
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"#total {self.phase} set: {len(self.list)}."

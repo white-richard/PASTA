@@ -18,7 +18,6 @@ import numpy as np
 
 # from sched import scheduler
 import torch
-import torch.backends.cudnn as cudnn
 import wandb
 import yaml
 from hpman.m import _
@@ -29,6 +28,7 @@ from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
 from timm.utils import NativeScaler
 from torch import nn
+from torch.backends import cudnn
 from torch.utils.data import DataLoader
 
 # visualization
@@ -37,7 +37,7 @@ from transformers import (
     MBart50TokenizerFast,
 )
 
-import utils as utils
+import utils
 from datasets import S2T_Dataset
 
 # global definition
@@ -50,7 +50,8 @@ from models import MMLP
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
-        "Multimodal-Language-Pre-training (MMLP) scripts", add_help=False
+        "Multimodal-Language-Pre-training (MMLP) scripts",
+        add_help=False,
     )
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument("--epochs", default=80, type=int)
@@ -58,7 +59,9 @@ def get_args_parser():
     # distributed training parameters
     parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
     parser.add_argument(
-        "--dist_url", default="env://", help="url used to set up distributed training"
+        "--dist_url",
+        default="env://",
+        help="url used to set up distributed training",
     )
     parser.add_argument("--local_rank", default=0, type=int)
 
@@ -67,7 +70,11 @@ def get_args_parser():
 
     # * Optimizer parameters
     parser.add_argument(
-        "--opt", default="adamw", type=str, metavar="OPTIMIZER", help='Optimizer (default: "adamw"'
+        "--opt",
+        default="adamw",
+        type=str,
+        metavar="OPTIMIZER",
+        help='Optimizer (default: "adamw"',
     )
     parser.add_argument(
         "--opt-eps",
@@ -92,10 +99,17 @@ def get_args_parser():
         help="Clip gradient norm (default: None, no clipping)",
     )
     parser.add_argument(
-        "--momentum", type=float, default=0.9, metavar="M", help="SGD momentum (default: 0.9)"
+        "--momentum",
+        type=float,
+        default=0.9,
+        metavar="M",
+        help="SGD momentum (default: 0.9)",
     )
     parser.add_argument(
-        "--weight-decay", type=float, default=0.2, help="weight decay (default: 0.05)"
+        "--weight-decay",
+        type=float,
+        default=0.2,
+        help="weight decay (default: 0.05)",
     )
 
     # * Learning rate schedule parameters
@@ -107,7 +121,11 @@ def get_args_parser():
         help='LR scheduler (default: "cosine"',
     )
     parser.add_argument(
-        "--lr", type=float, default=1.0e-3, metavar="LR", help="learning rate (default: 5e-4)"
+        "--lr",
+        type=float,
+        default=1.0e-3,
+        metavar="LR",
+        help="learning rate (default: 5e-4)",
     )
     parser.add_argument(
         "--lr-noise",
@@ -147,7 +165,11 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--decay-epochs", type=float, default=30, metavar="N", help="epoch interval to decay LR"
+        "--decay-epochs",
+        type=float,
+        default=30,
+        metavar="N",
+        help="epoch interval to decay LR",
     )
     parser.add_argument(
         "--warmup-epochs",
@@ -249,7 +271,7 @@ def get_args_parser():
     return parser
 
 
-def main(args, config):
+def main(args, config) -> None:
     utils.init_distributed_mode(args)
     print(args)
 
@@ -281,16 +303,16 @@ def main(args, config):
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True)
 
     def make_train_dataloader():
-        train_loader_kwargs = dict(
-            dataset=train_data,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            collate_fn=train_data.collate_fn,
-            sampler=train_sampler,
-            pin_memory=args.pin_mem,
-            drop_last=True,
-            persistent_workers=args.num_workers > 0,
-        )
+        train_loader_kwargs = {
+            "dataset": train_data,
+            "batch_size": args.batch_size,
+            "num_workers": args.num_workers,
+            "collate_fn": train_data.collate_fn,
+            "sampler": train_sampler,
+            "pin_memory": args.pin_mem,
+            "drop_last": True,
+            "persistent_workers": args.num_workers > 0,
+        }
         if args.num_workers > 0:
             train_loader_kwargs["prefetch_factor"] = args.prefetch_factor
         return DataLoader(**train_loader_kwargs)
@@ -304,15 +326,15 @@ def main(args, config):
     )
     print(dev_data)
     dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
-    dev_loader_kwargs = dict(
-        dataset=dev_data,
-        batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
-        collate_fn=dev_data.collate_fn,
-        sampler=dev_sampler,
-        pin_memory=args.pin_mem,
-        persistent_workers=False,
-    )
+    dev_loader_kwargs = {
+        "dataset": dev_data,
+        "batch_size": args.batch_size,
+        "num_workers": args.eval_num_workers,
+        "collate_fn": dev_data.collate_fn,
+        "sampler": dev_sampler,
+        "pin_memory": args.pin_mem,
+        "persistent_workers": False,
+    }
     if args.eval_num_workers > 0:
         dev_loader_kwargs["prefetch_factor"] = args.eval_prefetch_factor
     dev_dataloader = DataLoader(**dev_loader_kwargs)
@@ -326,15 +348,15 @@ def main(args, config):
     )
     print(test_data)
     test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
-    test_loader_kwargs = dict(
-        dataset=test_data,
-        batch_size=args.batch_size,
-        num_workers=args.eval_num_workers,
-        collate_fn=test_data.collate_fn,
-        sampler=test_sampler,
-        pin_memory=args.pin_mem,
-        persistent_workers=False,
-    )
+    test_loader_kwargs = {
+        "dataset": test_data,
+        "batch_size": args.batch_size,
+        "num_workers": args.eval_num_workers,
+        "collate_fn": test_data.collate_fn,
+        "sampler": test_sampler,
+        "pin_memory": args.pin_mem,
+        "persistent_workers": False,
+    }
     if args.eval_num_workers > 0:
         test_loader_kwargs["prefetch_factor"] = args.eval_prefetch_factor
     test_dataloader = DataLoader(**test_loader_kwargs)
@@ -354,7 +376,9 @@ def main(args, config):
     if args.distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=False
+            model,
+            device_ids=[args.gpu],
+            find_unused_parameters=False,
         )
         model_without_ddp = model.module
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
@@ -385,16 +409,16 @@ def main(args, config):
     if args.eval:
         if not args.resume:
             logger.warning(
-                "Please specify the trained model: --resume /path/to/best_checkpoint.pth"
+                "Please specify the trained model: --resume /path/to/best_checkpoint.pth",
             )
         dev_stats = evaluate(args, dev_dataloader, model, criterion, args.start_epoch)
         print(
-            f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}"
+            f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}",
         )
 
         test_stats = evaluate(args, test_dataloader, model, criterion, args.start_epoch)
         print(
-            f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}"
+            f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}",
         )
         return
 
@@ -416,7 +440,15 @@ def main(args, config):
         # and the OOM killer fires at the first eval batch.
         train_dataloader = make_train_dataloader()
         train_stats = train_one_epoch(
-            args, model, criterion, train_dataloader, optimizer, device, epoch, config, loss_scaler
+            args,
+            model,
+            criterion,
+            train_dataloader,
+            optimizer,
+            device,
+            epoch,
+            config,
+            loss_scaler,
         )
         # Explicitly delete so worker processes are reaped before eval.
         del train_dataloader
@@ -462,7 +494,7 @@ def main(args, config):
                     "training/train_loss": train_stats["loss"],
                     "dev/dev_loss": test_stats["loss"],
                     "dev/min_loss": min_loss,
-                }
+                },
             )
 
         log_stats = {
@@ -486,12 +518,12 @@ def main(args, config):
 
         dev_stats = evaluate(args, dev_dataloader, model, criterion, epoch)
         print(
-            f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}"
+            f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}",
         )
 
         test_stats = evaluate(args, test_dataloader, model, criterion, epoch)
         print(
-            f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}"
+            f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}",
         )
 
     total_time = time.time() - start_time
@@ -522,13 +554,13 @@ def train_one_epoch(
     loss_i = criterion
 
     for step, (src_input, tgt_input) in enumerate(
-        metric_logger.log_every(data_loader, print_freq, header)
+        metric_logger.log_every(data_loader, print_freq, header),
     ):
         if args.debug_mode and step >= 2:
             print("DEBUG MODE: stopping after 2 batches.")
             break
         optimizer.zero_grad()
-        with torch.amp.autocast("cuda"):
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             sim_text, sim_image, descript_loss = model(src_input, tgt_input)
             loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
             loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
@@ -564,13 +596,13 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
 
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
-            metric_logger.log_every(dev_dataloader, print_freq, header)
+            metric_logger.log_every(dev_dataloader, print_freq, header),
         ):
             if args.debug_mode and step >= 2:
                 print("DEBUG MODE: stopping after 2 batches.")
                 break
 
-            with torch.amp.autocast("cuda"):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 sim_text, sim_image, descript_loss = model(src_input, tgt_input)
                 loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
                 loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
@@ -587,7 +619,7 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def log_memory(args, tag):
+def log_memory(args, tag) -> None:
     if not getattr(args, "log_memory", False):
         return
 
@@ -624,21 +656,20 @@ def setup_run(args, config):
         run.define_metric("epoch")
         run.define_metric("training/*", step_metric="epoch")
         run.define_metric("dev/*", step_metric="epoch")
+    elif utils.is_main_process():
+        os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
+        run = wandb.init(
+            entity=args.entity,
+            project=args.project,
+            config=config,
+        )
+        run.define_metric("epoch")
+        run.define_metric("training/*", step_metric="epoch")
+        run.define_metric("dev/*", step_metric="epoch")
+        run.name = args.output_dir.split("/")[-1]
     else:
-        if utils.is_main_process():
-            os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
-            run = wandb.init(
-                entity=args.entity,
-                project=args.project,
-                config=config,
-            )
-            run.define_metric("epoch")
-            run.define_metric("training/*", step_metric="epoch")
-            run.define_metric("dev/*", step_metric="epoch")
-            run.name = args.output_dir.split("/")[-1]
-        else:
-            os.environ["WANDB_MODE"] = "disabled"
-            run = False
+        os.environ["WANDB_MODE"] = "disabled"
+        run = False
 
     return run
 
@@ -647,7 +678,8 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     parser = argparse.ArgumentParser(
-        "Multimodal-Language-Pretraining(MMLP) scripts", parents=[get_args_parser()]
+        "Multimodal-Language-Pretraining(MMLP) scripts",
+        parents=[get_args_parser()],
     )
     _.parse_file(Path(__file__).resolve().parent)
     hpargparse.bind(parser, _)

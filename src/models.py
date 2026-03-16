@@ -1,26 +1,25 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
 # from utils import create_mask
 import torchvision
+from peft import LoraConfig, get_peft_model
+from torch import nn
+from torch.nn.utils.rnn import pad_sequence
 
 # import pytorchvideo.models.x3d as x3d
-import utils as utils
-from peft import LoraConfig, get_peft_model
-from torch.nn.utils.rnn import pad_sequence
 
 """ PyTorch MBART model."""
 
 import numpy as np
-
-# global definition
-from definition import *
 from hpman.m import _
 from transformers import (
     MBartForConditionalGeneration,
 )
+
+# global definition
+from definition import *
 
 
 def make_resnet(name="resnet18"):
@@ -33,9 +32,9 @@ def make_resnet(name="resnet18"):
     elif name == "resnet101":
         model = torchvision.models.resnet101(weights=torchvision.models.ResNet101_Weights.DEFAULT)
     else:
-        raise Exception("There are no supported resnet model {}.".format(_("resnet")))
+        msg = "There are no supported resnet model {}.".format(_("resnet"))
+        raise Exception(msg)
 
-    inchannel = model.fc.in_features
     model.fc = nn.Identity()
     # model.fc = nn.Linear(inchannel, 768)
     return model
@@ -49,13 +48,11 @@ def to_btc(x, lengths):
         end = start + length
         x_batch.append(x[start:end])
         start = end
-    x = pad_sequence(x_batch, padding_value=PAD_IDX, batch_first=True)
-
-    return x
+    return pad_sequence(x_batch, padding_value=PAD_IDX, batch_first=True)
 
 
 class resnet(nn.Module):
-    def __init__(self, frozen=False):
+    def __init__(self, frozen=False) -> None:
         super().__init__()
         self.resnet = make_resnet(name="resnet18")
 
@@ -71,13 +68,12 @@ class resnet(nn.Module):
             end = start + length
             x_batch.append(x[start:end])
             start = end
-        x = pad_sequence(x_batch, padding_value=PAD_IDX, batch_first=True)
-        return x
+        return pad_sequence(x_batch, padding_value=PAD_IDX, batch_first=True)
         # return x_batch
 
 
 class TemporalConv(nn.Module):
-    def __init__(self, input_size, hidden_size, conv_type=2):
+    def __init__(self, input_size, hidden_size, conv_type=2) -> None:
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -98,8 +94,12 @@ class TemporalConv(nn.Module):
             elif ks[0] == "K":
                 modules.append(
                     nn.Conv1d(
-                        input_sz, self.hidden_size, kernel_size=int(ks[1]), stride=1, padding=0
-                    )
+                        input_sz,
+                        self.hidden_size,
+                        kernel_size=int(ks[1]),
+                        stride=1,
+                        padding=0,
+                    ),
                 )
                 modules.append(nn.BatchNorm1d(self.hidden_size))
                 modules.append(nn.ReLU(inplace=True))
@@ -111,7 +111,7 @@ class TemporalConv(nn.Module):
 
 
 class Projector(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim) -> None:
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -120,8 +120,7 @@ class Projector(nn.Module):
         )
 
     def forward(self, x):
-        encoded = self.encoder(x)
-        return encoded
+        return self.encoder(x)
 
 
 class MMSLT(nn.Module):
@@ -132,7 +131,7 @@ class MMSLT(nn.Module):
         inplanes=768,
         planes=1024,
         pretrain=None,
-    ):
+    ) -> None:
         super().__init__()
         self.config = config
         self.args = args
@@ -195,22 +194,21 @@ class MMSLT(nn.Module):
 
         inputs_embeds, attention_mask = self.share_forward(src_input)
 
-        out = self.mbart.generate(
+        return self.mbart.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask.cuda(),
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
             forced_bos_token_id=forced_bos_token_id,
         )
-        return out
 
 
 class TextEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
         self.model_txt = MBartForConditionalGeneration.from_pretrained(
-            "facebook/mbart-large-50-many-to-many-mmt"
+            "facebook/mbart-large-50-many-to-many-mmt",
         ).get_encoder()
         for param in self.model_txt.parameters():
             param.requires_grad = False
@@ -222,12 +220,11 @@ class TextEncoder(nn.Module):
                 attention_mask=tgt_input["attention_mask"].cuda(),
             )[0]
 
-        output = txt_logits.mean(dim=1)  # [b, 1024]
-        return output
+        return txt_logits.mean(dim=1)  # [b, 1024]
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, inplanes=768, planes=1024, head_type="linear"):
+    def __init__(self, inplanes=768, planes=1024, head_type="linear") -> None:
         super().__init__()
 
         self.backbone = resnet()
@@ -238,7 +235,7 @@ class ImageEncoder(nn.Module):
         self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes)
         # Multimodal encoder
         self.trans_encoder = MBartForConditionalGeneration.from_pretrained(
-            "facebook/mbart-large-50-many-to-many-mmt"
+            "facebook/mbart-large-50-many-to-many-mmt",
         ).get_encoder()
         lora_config = LoraConfig(
             r=16,
@@ -269,7 +266,9 @@ class ImageEncoder(nn.Module):
         attention_mask = src_input["attention_mask"]
 
         outs = self.trans_encoder(
-            inputs_embeds=inputs_embeds, attention_mask=attention_mask.cuda(), return_dict=True
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask.cuda(),
+            return_dict=True,
         )
         last_hidden_state = outs["last_hidden_state"]
         # output = last_hidden_state[:, 0, :] #[b, 1024]
@@ -279,7 +278,7 @@ class ImageEncoder(nn.Module):
 
 
 class MMLP(nn.Module):
-    def __init__(self, config, embed_dim=1024):
+    def __init__(self, config, embed_dim=1024) -> None:
         super().__init__()
         self.model_text = TextEncoder()
         self.model_image = ImageEncoder(inplanes=768, planes=embed_dim)
