@@ -227,6 +227,12 @@ def get_args_parser():
     # * data process params
     parser.add_argument("--input-size", default=224, type=int)
     parser.add_argument("--resize", default=256, type=int)
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="resnet18",
+        help="timm model name to use as vision backbone (e.g. resnet18, vit_base_patch14_dinov2.lvd142m).",
+    )
 
     # * wandb params
     parser.add_argument(
@@ -340,7 +346,7 @@ def main(args, config):
     test_dataloader = DataLoader(**test_loader_kwargs)
 
     print("Creating model:")
-    model = MMLP(config=config)
+    model = MMLP(config=config, backbone=args.backbone)
     model.to(device)
     print(model)
 

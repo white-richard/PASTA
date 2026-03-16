@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 
 # from utils import create_mask
+import timm
 import torchvision
 
 # import pytorchvideo.models.x3d as x3d
@@ -76,6 +77,40 @@ class resnet(nn.Module):
         # return x_batch
 
 
+class TimmBackbone(nn.Module):
+    def __init__(self, name, frozen=False):
+        super().__init__()
+        self.model = timm.create_model(name, pretrained=True, num_classes=0)
+        # Probe output dim once at init
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, 224, 224)
+            self.output_dim = self.model(dummy).shape[-1]
+        if frozen:
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+    def forward(self, x, lengths):
+        x = self.model(x)  # (total_frames, output_dim)
+        x_batch = []
+        start = 0
+        for length in lengths:
+            end = start + length
+            x_batch.append(x[start:end])
+            start = end
+        return pad_sequence(x_batch, padding_value=PAD_IDX, batch_first=True)
+
+
+_RESNET_NAMES = {"resnet18", "resnet34", "resnet50", "resnet101"}
+
+
+def build_backbone(name="resnet18"):
+    """Returns (backbone_module, output_dim). Preserves legacy resnet18 path."""
+    if name == "resnet18":
+        return resnet(), 512
+    backbone = TimmBackbone(name)
+    return backbone, backbone.output_dim
+
+
 class TemporalConv(nn.Module):
     def __init__(self, input_size, hidden_size, conv_type=2):
         super().__init__()
@@ -132,6 +167,7 @@ class MMSLT(nn.Module):
         inplanes=768,
         planes=1024,
         pretrain=None,
+        backbone="resnet18",
     ):
         super().__init__()
         self.config = config
@@ -155,11 +191,11 @@ class MMSLT(nn.Module):
         self.mbart = get_peft_model(self.mbart, lora_config)
         self.mbart.generation_config.max_length = None
 
-        self.backbone = resnet()
+        self.backbone, backbone_dim = build_backbone(backbone)
         # Description mapper
-        self.descriptproj = Projector(input_dim=512, hidden_dim=planes, output_dim=inplanes)
+        self.descriptproj = Projector(input_dim=backbone_dim, hidden_dim=planes, output_dim=inplanes)
         # Modality adapter
-        self.conv = TemporalConv(input_size=512 + inplanes, hidden_size=planes, conv_type=2)
+        self.conv = TemporalConv(input_size=backbone_dim + inplanes, hidden_size=planes, conv_type=2)
         self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes)
         # Freeze DM
         for param in self.descriptproj.parameters():
@@ -227,14 +263,14 @@ class TextEncoder(nn.Module):
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, inplanes=768, planes=1024, head_type="linear"):
+    def __init__(self, inplanes=768, planes=1024, head_type="linear", backbone="resnet18"):
         super().__init__()
 
-        self.backbone = resnet()
+        self.backbone, backbone_dim = build_backbone(backbone)
         # Description mapper
-        self.descriptproj = Projector(input_dim=512, hidden_dim=planes, output_dim=inplanes)
+        self.descriptproj = Projector(input_dim=backbone_dim, hidden_dim=planes, output_dim=inplanes)
         # Modality Adapter
-        self.conv = TemporalConv(input_size=512 + 768, hidden_size=planes, conv_type=2)
+        self.conv = TemporalConv(input_size=backbone_dim + inplanes, hidden_size=planes, conv_type=2)
         self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes)
         # Multimodal encoder
         self.trans_encoder = MBartForConditionalGeneration.from_pretrained(
@@ -279,10 +315,10 @@ class ImageEncoder(nn.Module):
 
 
 class MMLP(nn.Module):
-    def __init__(self, config, embed_dim=1024):
+    def __init__(self, config, embed_dim=1024, backbone="resnet18"):
         super().__init__()
         self.model_text = TextEncoder()
-        self.model_image = ImageEncoder(inplanes=768, planes=embed_dim)
+        self.model_image = ImageEncoder(inplanes=768, planes=embed_dim, backbone=backbone)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
     def forward(self, src_input, tgt_input):

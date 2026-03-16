@@ -234,6 +234,12 @@ def get_args_parser():
     # * data process params
     parser.add_argument("--input-size", default=224, type=int)
     parser.add_argument("--resize", default=256, type=int)
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="resnet18",
+        help="timm model name to use as vision backbone (e.g. resnet18, vit_base_patch14_dinov2.lvd142m).",
+    )
 
     # * visualization
     parser.add_argument("--visualize", action="store_true")
@@ -345,7 +351,7 @@ def main(args, config):
 
     print("Creating model:")
 
-    model = MMSLT(config, args)
+    model = MMSLT(config, args, backbone=args.backbone)
     model.to(device)
 
     if args.finetune:
