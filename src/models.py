@@ -1,9 +1,8 @@
+# from utils import create_mask
+import timm
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-
-# from utils import create_mask
-import timm
 import torchvision
 from peft import LoraConfig, get_peft_model
 from torch import nn
@@ -74,7 +73,7 @@ class resnet(nn.Module):
 
 
 class TimmBackbone(nn.Module):
-    def __init__(self, name, frozen=False):
+    def __init__(self, name, frozen=False) -> None:
         super().__init__()
         self.model = timm.create_model(name, pretrained=True, num_classes=0)
         # Probe output dim once at init
@@ -101,7 +100,7 @@ class DummyBackbone(nn.Module):
 
     output_dim = 64
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.conv = nn.Conv2d(3, self.output_dim, kernel_size=7, stride=2, padding=3)
         self.pool = nn.AdaptiveAvgPool2d(1)
@@ -187,7 +186,7 @@ class MMSLT(nn.Module):
         inplanes=768,
         planes=1024,
         pretrain=None,
-        backbone="resnet18",
+        vision_backbone="resnet18",
     ) -> None:
         super().__init__()
         self.config = config
@@ -211,11 +210,19 @@ class MMSLT(nn.Module):
         self.mbart = get_peft_model(self.mbart, lora_config)
         self.mbart.generation_config.max_length = None
 
-        self.backbone, backbone_dim = build_backbone(backbone)
+        self.backbone, backbone_dim = build_backbone(vision_backbone)
         # Description mapper
-        self.descriptproj = Projector(input_dim=backbone_dim, hidden_dim=planes, output_dim=inplanes)
+        self.descriptproj = Projector(
+            input_dim=backbone_dim,
+            hidden_dim=planes,
+            output_dim=inplanes,
+        )
         # Modality adapter
-        self.conv = TemporalConv(input_size=backbone_dim + inplanes, hidden_size=planes, conv_type=2)
+        self.conv = TemporalConv(
+            input_size=backbone_dim + inplanes,
+            hidden_size=planes,
+            conv_type=2,
+        )
         self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes)
         # Freeze DM
         for param in self.descriptproj.parameters():
@@ -264,6 +271,7 @@ class TextEncoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
+        self.grad_cache = True
         self.model_txt = MBartForConditionalGeneration.from_pretrained(
             "facebook/mbart-large-50-many-to-many-mmt",
         ).get_encoder()
@@ -271,11 +279,18 @@ class TextEncoder(nn.Module):
             param.requires_grad = False
 
     def forward(self, tgt_input):
-        with torch.no_grad():
+        # If using gradcahe, then is not needed
+        if self.grad_cache:
             txt_logits = self.model_txt(
                 input_ids=tgt_input["input_ids"].cuda(),
                 attention_mask=tgt_input["attention_mask"].cuda(),
             )[0]
+        else:
+            with torch.no_grad():
+                txt_logits = self.model_txt(
+                    input_ids=tgt_input["input_ids"].cuda(),
+                    attention_mask=tgt_input["attention_mask"].cuda(),
+                )[0]
 
         return txt_logits.mean(dim=1)  # [b, 1024]
 
@@ -286,9 +301,17 @@ class ImageEncoder(nn.Module):
 
         self.backbone, backbone_dim = build_backbone(backbone)
         # Description mapper
-        self.descriptproj = Projector(input_dim=backbone_dim, hidden_dim=planes, output_dim=inplanes)
+        self.descriptproj = Projector(
+            input_dim=backbone_dim,
+            hidden_dim=planes,
+            output_dim=inplanes,
+        )
         # Modality Adapter
-        self.conv = TemporalConv(input_size=backbone_dim + inplanes, hidden_size=planes, conv_type=2)
+        self.conv = TemporalConv(
+            input_size=backbone_dim + inplanes,
+            hidden_size=planes,
+            conv_type=2,
+        )
         self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes)
         # Multimodal encoder
         self.trans_encoder = MBartForConditionalGeneration.from_pretrained(
@@ -335,11 +358,21 @@ class ImageEncoder(nn.Module):
 
 
 class MMLP(nn.Module):
-    def __init__(self, config, embed_dim=1024, backbone="resnet18") -> None:
+    def __init__(self, config, embed_dim=1024, vision_backbone="resnet18") -> None:
         super().__init__()
         self.model_text = TextEncoder()
-        self.model_image = ImageEncoder(inplanes=768, planes=embed_dim, backbone=backbone)
+        self.model_image = ImageEncoder(inplanes=768, planes=embed_dim, backbone=vision_backbone)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+    def encode_sign(self, src_input):
+        """Returns (normalized_sign_embedding, mse_loss)."""
+        output, mse_loss = self.model_image(src_input)
+        return F.normalize(output, p=2, dim=-1), mse_loss
+
+    def encode_text(self, tgt_input):
+        """Returns normalized text embedding."""
+        output = self.model_text(tgt_input)
+        return F.normalize(output, p=2, dim=-1)
 
     def forward(self, src_input, tgt_input):
         text_features = self.model_text(tgt_input)

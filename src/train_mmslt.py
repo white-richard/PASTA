@@ -53,7 +53,6 @@ except:
 # *timm
 # global definition
 from timm.optim import create_optimizer
-from timm.utils import NativeScaler
 
 from definition import *
 
@@ -65,15 +64,6 @@ def get_args_parser():
     )
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument("--epochs", default=80, type=int)
-
-    # * distributed training parameters
-    parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
-    parser.add_argument(
-        "--dist_url",
-        default="env://",
-        help="url used to set up distributed training",
-    )
-    parser.add_argument("--local_rank", default=0, type=int)
 
     # * Finetuning params
     parser.add_argument("--finetune", default="", help="finetune from checkpoint")
@@ -218,12 +208,7 @@ def get_args_parser():
     parser.add_argument("--resume", default="", help="resume from checkpoint")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
-    parser.add_argument(
-        "--dist-eval",
-        action="store_true",
-        default=False,
-        help="Enabling distributed evaluation",
-    )
+
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument(
         "--eval_num_workers",
@@ -238,7 +223,7 @@ def get_args_parser():
     )
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
-    parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
+    parser.add_argument("--config", type=str, default="src/configs/config_mmslt_phoenix.yaml")
     parser.add_argument(
         "--log-memory",
         action="store_true",
@@ -265,10 +250,10 @@ def get_args_parser():
     parser.add_argument("--input-size", default=224, type=int)
     parser.add_argument("--resize", default=256, type=int)
     parser.add_argument(
-        "--backbone",
+        "--vision_backbone",
         type=str,
         default="resnet18",
-        help="Vision backbone name. Use 'dummy' for a tiny random-weight model (fast smoke tests), or any timm model name (e.g. resnet18, vit_base_patch14_dinov2.lvd142m).",
+        help="Vision vision_backbone name. Use 'dummy' for a tiny random-weight model (fast smoke tests), or any timm model name (e.g. resnet18, vit_base_patch14_dinov2.lvd142m).",
     )
 
     # * visualization
@@ -286,13 +271,13 @@ def get_args_parser():
 
 def main(args, config) -> None:
     # torch.multiprocessing.set_start_method('spawn')
-    utils.init_distributed_mode(args)
+    args.distributed = False
     print(args)
 
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
+    seed = args.seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -333,19 +318,14 @@ def main(args, config) -> None:
     )
     print(test_data)
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True)
-        dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
-        test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
-
     pin_mem = bool(args.pin_mem and args.device.startswith("cuda"))
 
     train_loader_kwargs = {
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
         "collate_fn": train_data.collate_fn,
-        "sampler": train_sampler if args.distributed else None,
-        "shuffle": (args.distributed is False),
+        "sampler": None,
+        "shuffle": True,
         "pin_memory": pin_mem,
     }
     if args.num_workers > 0:
@@ -366,22 +346,22 @@ def main(args, config) -> None:
     dev_dataloader = DataLoader(
         dev_data,
         collate_fn=dev_data.collate_fn,
-        sampler=dev_sampler if args.distributed else None,
-        shuffle=(args.distributed is False),
+        sampler=None,
+        shuffle=False,
         **eval_loader_kwargs,
     )
 
     test_dataloader = DataLoader(
         test_data,
         collate_fn=test_data.collate_fn,
-        sampler=test_sampler if args.distributed else None,
-        shuffle=(args.distributed is False),
+        sampler=None,
+        shuffle=False,
         **eval_loader_kwargs,
     )
 
     print("Creating model:")
 
-    model = MMSLT(config, args, backbone=args.backbone)
+    model = MMSLT(config, args, vision_backbone=args.vision_backbone)
     model.to(device)
 
     if args.finetune:
@@ -413,15 +393,6 @@ def main(args, config) -> None:
 
     # print(model)
     model_without_ddp = model
-
-    if args.distributed:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[args.gpu],
-            find_unused_parameters=False,
-        )
-        model_without_ddp = model.module
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
 
@@ -433,8 +404,6 @@ def main(args, config) -> None:
         eta_min=1e-8,
         T_max=args.epochs,
     )
-    loss_scaler = NativeScaler()
-
     ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
 
     output_dir = Path(args.output_dir)
@@ -501,9 +470,6 @@ def main(args, config) -> None:
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
-
         train_stats = train_one_epoch(
             args,
             model,
@@ -513,14 +479,13 @@ def main(args, config) -> None:
             device,
             epoch,
             config,
-            loss_scaler,
         )
         lr_scheduler.step(epoch)
 
-        if args.output_dir and utils.is_main_process():
+        if args.output_dir:
             checkpoint_paths = [output_dir / "checkpoint.pth"]
             for checkpoint_path in checkpoint_paths:
-                utils.save_on_master(
+                torch.save(
                     {
                         "model": model_without_ddp.state_dict(),
                         "optimizer": optimizer.state_dict(),
@@ -549,10 +514,10 @@ def main(args, config) -> None:
 
         if max_accuracy < test_stats["belu4"]:
             max_accuracy = test_stats["belu4"]
-            if args.output_dir and utils.is_main_process():
+            if args.output_dir:
                 checkpoint_paths = [output_dir / "best_checkpoint.pth"]
                 for checkpoint_path in checkpoint_paths:
-                    utils.save_on_master(
+                    torch.save(
                         {
                             "model": model_without_ddp.state_dict(),
                             "optimizer": optimizer.state_dict(),
@@ -564,16 +529,15 @@ def main(args, config) -> None:
                     )
 
         print(f"Max BELU-4: {max_accuracy:.2f}%")
-        if utils.is_main_process():
-            wandb.log(
-                {
-                    "epoch": epoch + 1,
-                    "training/train_loss": train_stats["loss"],
-                    "dev/dev_loss": test_stats["loss"],
-                    "dev/Bleu_4": test_stats["belu4"],
-                    "dev/Best_Bleu_4": max_accuracy,
-                },
-            )
+        wandb.log(
+            {
+                "epoch": epoch + 1,
+                "training/train_loss": train_stats["loss"],
+                "dev/dev_loss": test_stats["loss"],
+                "dev/Bleu_4": test_stats["belu4"],
+                "dev/Best_Bleu_4": max_accuracy,
+            },
+        )
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
@@ -582,7 +546,7 @@ def main(args, config) -> None:
             "n_parameters": n_parameters,
         }
 
-        if args.output_dir and utils.is_main_process():
+        if args.output_dir:
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
@@ -644,7 +608,6 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     config,
-    loss_scaler,
     max_norm: float = 0,
     set_training_mode=True,
 ):
@@ -678,8 +641,8 @@ def train_one_epoch(
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_llm=round(float(optimizer.param_groups[1]["lr"]), 8))
 
-        if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
-            utils.visualization(model.module.visualize())
+        if (step + 1) % 10 == 0 and args.visualize:
+            utils.visualization(model.visualize())
 
         if args.debug_mode and step >= 1:
             print("*** DEBUG MODE: stopping after 2 batches ***")
@@ -762,7 +725,7 @@ def evaluate(
     metric_logger.synchronize_between_processes()
     print(f"* BELU-4 {metric_logger.belu4.global_avg:.3f} loss {metric_logger.loss.global_avg:.3f}")
 
-    if utils.is_main_process() and utils.get_world_size() == 1 and args.eval:
+    if args.eval:
         with open(args.output_dir + "/tmp_pres.txt", "w") as f:
             f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
         with open(args.output_dir + "/tmp_refs.txt", "w") as f:
@@ -790,12 +753,11 @@ if __name__ == "__main__":
         config = yaml.load(f, Loader=yaml.FullLoader)
 
     os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
-    if utils.is_main_process():
-        wandb.init(project="", config=config)
-        wandb.run.name = args.output_dir.split("/")[-1]
-        wandb.define_metric("epoch")
-        wandb.define_metric("training/*", step_metric="epoch")
-        wandb.define_metric("dev/*", step_metric="epoch")
+    wandb.init(project="", config=config)
+    wandb.run.name = args.output_dir.split("/")[-1]
+    wandb.define_metric("epoch")
+    wandb.define_metric("training/*", step_metric="epoch")
+    wandb.define_metric("dev/*", step_metric="epoch")
 
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)

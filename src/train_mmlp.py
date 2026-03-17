@@ -18,15 +18,16 @@ import numpy as np
 
 # from sched import scheduler
 import torch
+import torch.nn.functional as F
 import wandb
 import yaml
+from grad_cache import GradCache
 from hpman.m import _
 from loguru import logger
 
 # *timm
 from timm.optim import create_optimizer
 from timm.scheduler import create_scheduler
-from timm.utils import NativeScaler
 from torch import nn
 from torch.backends import cudnn
 from torch.utils.data import DataLoader
@@ -46,7 +47,7 @@ from definition import *
 # *metric
 # *user-defined
 from models import MMLP
-
+from grad_cache_util import contrastive_loss_fn, split_dict_input, DictInputWrapper, split_input_fn, split_tgt_input, split_src_input
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
@@ -55,15 +56,6 @@ def get_args_parser():
     )
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument("--epochs", default=80, type=int)
-
-    # distributed training parameters
-    parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
-    parser.add_argument(
-        "--dist_url",
-        default="env://",
-        help="url used to set up distributed training",
-    )
-    parser.add_argument("--local_rank", default=0, type=int)
 
     # * Finetuning params
     parser.add_argument("--finetune", default="", help="finetune from checkpoint")
@@ -202,7 +194,11 @@ def get_args_parser():
     )
 
     # * Baise params
-    parser.add_argument("--output_dir", default="", help="path where to save, empty for no saving")
+    parser.add_argument(
+        "--output_dir",
+        default="out",
+        help="path where to save, empty for no saving",
+    )
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
@@ -239,7 +235,7 @@ def get_args_parser():
     )
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
-    parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
+    parser.add_argument("--config", type=str, default="src/configs/config_mmslt_phoenix.yaml")
     parser.add_argument(
         "--debug_mode",
         action="store_true",
@@ -250,10 +246,10 @@ def get_args_parser():
     parser.add_argument("--input-size", default=224, type=int)
     parser.add_argument("--resize", default=256, type=int)
     parser.add_argument(
-        "--backbone",
+        "--vision_backbone",
         type=str,
         default="resnet18",
-        help="Vision backbone name.",
+        help="Vision vision_backbone name.",
     )
 
     # * wandb params
@@ -273,18 +269,24 @@ def get_args_parser():
         default="",
         help="wandb project",
     )
-
+    parser.add_argument(
+        "--grad_chunk_size",
+        type=int,
+        default=None,
+        help="Chuck size for grad cache. This is a simulation of a per-gpu batch size for achieving large batches",
+    )
     return parser
 
 
 def main(args, config) -> None:
-    utils.init_distributed_mode(args)
+    args.distributed = False
+    args.gpu = None
     print(args)
 
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
+    seed = args.seed
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -306,7 +308,7 @@ def main(args, config) -> None:
         phase="train",
     )
     print(train_data)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_data, shuffle=True)
+    train_sampler = torch.utils.data.RandomSampler(train_data)
 
     def make_train_dataloader():
         train_loader_kwargs = {
@@ -331,7 +333,7 @@ def main(args, config) -> None:
         phase="dev",
     )
     print(dev_data)
-    dev_sampler = torch.utils.data.distributed.DistributedSampler(dev_data, shuffle=False)
+    dev_sampler = torch.utils.data.SequentialSampler(dev_data)
     dev_loader_kwargs = {
         "dataset": dev_data,
         "batch_size": args.batch_size,
@@ -353,7 +355,7 @@ def main(args, config) -> None:
         phase="test",
     )
     print(test_data)
-    test_sampler = torch.utils.data.distributed.DistributedSampler(test_data, shuffle=False)
+    test_sampler = torch.utils.data.SequentialSampler(test_data)
     test_loader_kwargs = {
         "dataset": test_data,
         "batch_size": args.batch_size,
@@ -368,7 +370,7 @@ def main(args, config) -> None:
     test_dataloader = DataLoader(**test_loader_kwargs)
 
     print("Creating model:")
-    model = MMLP(config=config, backbone=args.backbone)
+    model = MMLP(config=config, vision_backbone=args.vision_backbone)
     model.to(device)
     print(model)
 
@@ -379,14 +381,6 @@ def main(args, config) -> None:
         print("Unexpected keys: \n", "\n".join(ret.unexpected_keys))
 
     model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[args.gpu],
-            find_unused_parameters=False,
-        )
-        model_without_ddp = model.module
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
 
@@ -396,7 +390,6 @@ def main(args, config) -> None:
     lr_scheduler, _ = create_scheduler(args, optimizer)
 
     criterion = torch.nn.CrossEntropyLoss()
-    loss_scaler = NativeScaler()
 
     output_dir = Path(args.output_dir)
     if args.resume:
@@ -417,12 +410,19 @@ def main(args, config) -> None:
             logger.warning(
                 "Please specify the trained model: --resume /path/to/best_checkpoint.pth",
             )
-        dev_stats = evaluate(args, dev_dataloader, model, criterion, args.start_epoch)
+        dev_stats = evaluate(
+            args,
+            dev_dataloader,
+            model,
+            criterion,
+            args.start_epoch,
+            device=device,
+        )
         print(
             f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}",
         )
 
-        test_stats = evaluate(args, test_dataloader, model, criterion, args.start_epoch)
+        test_stats = evaluate(args, test_dataloader, model, criterion, args.start_epoch, device=device)
         print(
             f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}",
         )
@@ -436,8 +436,6 @@ def main(args, config) -> None:
     start_time = time.time()
     min_loss = np.inf
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
         log_memory(args, f"epoch_{epoch}_start")
 
         # Recreate each epoch so that when training finishes the DataLoader and
@@ -454,7 +452,6 @@ def main(args, config) -> None:
             device,
             epoch,
             config,
-            loss_scaler,
         )
         # Explicitly delete so worker processes are reaped before eval.
         del train_dataloader
@@ -474,7 +471,7 @@ def main(args, config) -> None:
                     checkpoint_path,
                 )
 
-        test_stats = evaluate(args, dev_dataloader, model, criterion, epoch)
+        test_stats = evaluate(args, dev_dataloader, model, criterion, epoch, device=device)
 
         if min_loss > test_stats["loss"]:
             min_loss = test_stats["loss"]
@@ -518,16 +515,15 @@ def main(args, config) -> None:
     # Last epoch
     test_on_last_epoch = True
     if test_on_last_epoch and args.output_dir:
-        torch.distributed.barrier()
         checkpoint = torch.load(args.output_dir + "/best_checkpoint.pth", map_location="cpu")
         model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
 
-        dev_stats = evaluate(args, dev_dataloader, model, criterion, epoch)
+        dev_stats = evaluate(args, dev_dataloader, model, criterion, epoch, device=device)
         print(
             f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}",
         )
 
-        test_stats = evaluate(args, test_dataloader, model, criterion, epoch)
+        test_stats = evaluate(args, test_dataloader, model, criterion, epoch, device=device)
         print(
             f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}",
         )
@@ -546,7 +542,6 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     config,
-    loss_scaler,
     max_norm: float = 0,
     set_training_mode=True,
 ):
@@ -556,8 +551,21 @@ def train_one_epoch(
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = f"Epoch: [{epoch}/{args.epochs}]"
     print_freq = 10
-    loss_t = criterion
-    loss_i = criterion
+
+    # Grad Cache
+    chunk_size = args.grad_chunk_size if args.grad_chunk_size is not None else args.batch_size
+    gc = GradCache(
+        models=[DictInputWrapper(model.model_image), DictInputWrapper(model.model_text)],
+        chunk_sizes=chunk_size,
+        loss_fn=contrastive_loss_fn,
+        split_input_fn=split_input_fn,
+        get_rep_fn=lambda out: out[0] if isinstance(out, tuple) else out,
+    )
+
+    # loss_t = criterion
+    # loss_i = criterion
+
+    optimizer.zero_grad()
 
     for step, (src_input, tgt_input) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header),
@@ -565,15 +573,29 @@ def train_one_epoch(
         if args.debug_mode and step >= 2:
             print("DEBUG MODE: stopping after 2 batches.")
             break
-        optimizer.zero_grad()
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            sim_text, sim_image, descript_loss = model(src_input, tgt_input)
-            loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
-            loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
-            total_loss = ((loss_text + loss_image) / 2.0) + (0.1 * descript_loss)
-        loss_scaler(total_loss, optimizer)
 
-        loss_value = total_loss.item()
+        contrastive_loss = gc(
+            src_input,  # goes to model.encode_sign
+            tgt_input,  # goes to model.encode_text
+        )
+        # with torch.amp.autocast("cuda"):
+        #     sim_text, sim_image, descript_loss = model(src_input, tgt_input)
+        #     loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
+        #     loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
+        #     total_loss = ((loss_text + loss_image) / 2.0) + (0.1 * descript_loss)
+        #
+        # loss_scaler(total_loss, optimizer)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            _, descript_loss = model.encode_sign(src_input)
+            scaled_descript = 0.1 * descript_loss
+
+        scaled_descript.backward()
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # loss_value = total_loss.item()
+        loss_value = contrastive_loss.item() + scaled_descript.item()
         if not math.isfinite(loss_value):
             print(f"Loss is {loss_value}, stopping training")
             sys.exit(1)
@@ -587,11 +609,10 @@ def train_one_epoch(
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def evaluate(args, dev_dataloader, model, criterion, epoch):
+def evaluate(args, dev_dataloader, model, criterion, epoch, device="cuda"):
     model.eval()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -600,6 +621,7 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
     loss_t = criterion
     loss_i = criterion
 
+    amp_enabled = (device.type == "cuda")
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
             metric_logger.log_every(dev_dataloader, print_freq, header),
@@ -608,7 +630,7 @@ def evaluate(args, dev_dataloader, model, criterion, epoch):
                 print("DEBUG MODE: stopping after 2 batches.")
                 break
 
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled):
                 sim_text, sim_image, descript_loss = model(src_input, tgt_input)
                 loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
                 loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
