@@ -105,7 +105,7 @@ nbformat
 nest-asyncio
 networkx
 ninja
-./nlg-eval-temp
+src/nlg-eval-temp
 nltk
 nose
 notebook

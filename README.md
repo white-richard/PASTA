@@ -40,9 +40,8 @@ source .venv/bin/activate
 Clone the dependency locally and relax its gensim version pin before installing:
 
 ```bash
-cd MMSLT
-git clone https://github.com/Maluuba/nlg-eval.git nlg-eval-temp
-cd nlg-eval-temp
+git clone https://github.com/Maluuba/nlg-eval.git src/nlg-eval-temp
+cd src/nlg-eval-temp
 git checkout 2ab4528fad5548315cf61e40c2249fec8c8ad233
 git checkout -b py310-patch
 sed -i 's/gensim~=3.8.3/gensim>=4.0.1/' requirements.txt
@@ -60,9 +59,11 @@ uv pip install torch torchvision torchaudio \
 
 uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
 
-uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+uv pip install -r requirements.txt
 
 uv pip install --upgrade "wandb>=0.19"
+
+git submodule update --init --recursive
 ```
 
 The `requirements.txt` references `nlg-eval-temp` via a relative path.
@@ -82,12 +83,7 @@ Before training, you must convert the raw LLaVA-generated text descriptions into
 
 ```bash
 sudo apt install jupyter-core
-```
-
-```bash
-cd MMSLT
-jupyter nbconvert --to notebook --execute --inplace descript_embed.ipynb
-cd ..
+jupyter nbconvert --to notebook --execute --inplace src/descript_embed.ipynb
 ```
 
 ---
@@ -98,54 +94,9 @@ Reproduce the authors results using the following bash script:
 This trains the MMLP then MMSLT using the paper's hyperparameters
 
 ```bash
-cd MMSLT
-bash reproduce_author.bash
+bash scripts/reproduce_author.bash
 ```
 
 ## Notes
 
-- The `--nproc_per_node=4` flag specifies that the training will use 4 GPUs. Adjust this based on your available GPU resources. However, for exact reproducibility of the results, it is highly recommended to use 4 GPUs as specified.
-- Text sign descriptions and weight files in our [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
-
-# DEPRICATED INSTRUCTIONS
-
-### 2. **MMLP Training**
-
-To train the MMLP (MultiModal Language Processing) model, run the following command:
-
-We should be in the MMSLT dir for training:
-
-```bash
-cd MMSLT
-```
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
---nproc_per_node=1 \
---master_port=1234 \
---use_env train_mmlp.py \
---batch-size 4 \
---epochs 80 \
---opt adamw \
---lr 1e-4 \
---output_dir pretrain_models/mmlp
-```
-
----
-
-### 3. **MMSLT Training**
-
-To fine-tune the MMSLT (MultiModal Spoken Language Translation) model, run the following command:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch \
---nproc_per_node=1 \
---master_port=1234 \
---use_env train_mmslt.py \
---batch-size 2 \
---epochs 200 \
---opt adamw \
---lr 1e-4 \
---finetune pretrain_models/mmlp/best_checkpoint.pth \
---output_dir out/mmslt
-```
+- Text sign descriptions and weight files from MMSLT can be found in [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
