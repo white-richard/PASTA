@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -32,12 +33,13 @@ fi
 
 if [[ "${RUN_TRAIN_MMLP}" -eq 1 ]]; then
   python src/train_mmlp.py \
-    --batch-size 4 \
+    --batch-size 16 \
     --epochs 80 \
     --opt adamw \
     --lr 1e-4 \
     --output_dir pretrain_models/mmlp \
-    --vision_backbone "${VISION_BACKBONE}"
+    --vision_backbone "${VISION_BACKBONE}" \
+    --grad_chunk_size 4 \
     "${DEBUG_ARGS[@]}"
 else
   echo "[SKIP] train_mmlp.py (RUN_TRAIN_MMLP=0)"
@@ -51,7 +53,7 @@ if [[ "${RUN_TRAIN_MMSLT}" -eq 1 ]]; then
     --lr 1e-4 \
     --finetune pretrain_models/mmlp/best_checkpoint.pth \
     --output_dir out/mmslt \
-    --vision_backbone "${VISION_BACKBONE}"
+    --vision_backbone "${VISION_BACKBONE}" \
     "${DEBUG_ARGS[@]}"
 else
   echo "[SKIP] train_mmslt.py (RUN_TRAIN_MMSLT=0)"
