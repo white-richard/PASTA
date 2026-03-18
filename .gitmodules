@@ -1,3 +1,6 @@
 [submodule "repos/gradcache"]
 	path = repos/gradcache
 	url = git@github.com:white-richard/GradCache.git
+[submodule "repos/perception_models"]
+	path = repos/perception_models
+	url = https://github.com/facebookresearch/perception_models.git
