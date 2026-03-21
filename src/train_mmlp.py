@@ -204,10 +204,10 @@ def get_args_parser():
     parser.add_argument("--resume", default="", help="resume from checkpoint")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
-    parser.add_argument("--num_workers", default=8, type=int)
+    parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument(
         "--eval_num_workers",
-        default=4,
+        default=2,
         type=int,
         help="Number of DataLoader workers for dev/test evaluation dataloaders. ",
     )
@@ -372,7 +372,6 @@ def main(args, config) -> None:
     print("Creating model:")
     model = MMLP(config=config, vision_backbone=args.vision_backbone)
     model.to(device)
-    print(model)
 
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location="cpu")

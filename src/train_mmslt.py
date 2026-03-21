@@ -391,7 +391,6 @@ def main(args, config) -> None:
         print("Missing keys: \n", "\n".join(ret.missing_keys))
         print("Unexpected keys: \n", "\n".join(ret.unexpected_keys))
 
-    # print(model)
     model_without_ddp = model
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
