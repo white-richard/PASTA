@@ -3,15 +3,19 @@ set -euo pipefail
 
 # pkill -9 -f "train_mmlp.py"
 
+# One GPU
 export CUDA_VISIBLE_DEVICES=0
 
 # Set to 1 to enable a script, 0 to disable it.
-RUN_TRAIN_MMLP=${RUN_TRAIN_MMLP:-1}
-RUN_TRAIN_MMSLT=${RUN_TRAIN_MMSLT:-1}
+RUN_TRAIN_MMLP=1
+RUN_TRAIN_MMSLT=1
 
 # Shared configs
 VISION_BACKBONE="resnet18"
-DEBUG_MODE=0
+# -----
+
+# Debug mode default with `--debug`
+DEBUG_MODE=${DEBUG_MODE:-0}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

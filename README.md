@@ -94,7 +94,8 @@ Reproduce the authors results using the following bash script:
 This trains the MMLP then MMSLT using the paper's hyperparameters
 
 ```bash
-bash scripts/reproduce_author.bash
+chmod +x scripts/reproduce_author.bash
+./scripts/reproduce_author.bash
 ```
 
 ## Notes
