@@ -246,7 +246,7 @@ class MMSLT(nn.Module):
 
         out = self.mbart(
             inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask.cuda(),
             # decoder_input_ids = tgt_input['input_ids'].cuda(),
             labels=tgt_input["input_ids"].cuda(),
             decoder_attention_mask=tgt_input["attention_mask"].cuda(),
