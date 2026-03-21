@@ -14,7 +14,7 @@ RUN_TRAIN_MMSLT=1
 VISION_BACKBONE="resnet18"
 # -----
 
-# Debug mode default with `--debug`
+# Debug mode using `--debug` flag
 DEBUG_MODE=${DEBUG_MODE:-0}
 
 while [[ $# -gt 0 ]]; do
