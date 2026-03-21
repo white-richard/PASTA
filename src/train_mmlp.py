@@ -18,10 +18,8 @@ import numpy as np
 
 # from sched import scheduler
 import torch
-import torch.nn.functional as F
 import wandb
 import yaml
-from grad_cache import GradCache
 from hpman.m import _
 from loguru import logger
 
@@ -43,11 +41,17 @@ from datasets import S2T_Dataset
 
 # global definition
 from definition import *
+from grad_cache_util import (
+    DictInputWrapper,
+    GradCacheWithAux,
+    contrastive_loss_fn,
+    split_input_fn,
+)
 
 # *metric
 # *user-defined
 from models import MMLP
-from grad_cache_util import contrastive_loss_fn, split_dict_input, DictInputWrapper, split_input_fn, split_tgt_input, split_src_input
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
@@ -421,7 +425,14 @@ def main(args, config) -> None:
             f"Dev loss of the network on the {len(dev_dataloader)} test videos: {dev_stats['loss']:.3f}",
         )
 
-        test_stats = evaluate(args, test_dataloader, model, criterion, args.start_epoch, device=device)
+        test_stats = evaluate(
+            args,
+            test_dataloader,
+            model,
+            criterion,
+            args.start_epoch,
+            device=device,
+        )
         print(
             f"Test loss of the network on the {len(test_dataloader)} test videos: {test_stats['loss']:.3f}",
         )
@@ -553,16 +564,16 @@ def train_one_epoch(
 
     # Grad Cache
     chunk_size = args.grad_chunk_size if args.grad_chunk_size is not None else args.batch_size
-    gc = GradCache(
-        models=[DictInputWrapper(model.model_image), DictInputWrapper(model.model_text)],
+    image_wrapper = DictInputWrapper(model.model_image)
+    text_wrapper = DictInputWrapper(model.model_text)
+    gc = GradCacheWithAux(
+        models=[image_wrapper, text_wrapper],
         chunk_sizes=chunk_size,
         loss_fn=contrastive_loss_fn,
         split_input_fn=split_input_fn,
         get_rep_fn=lambda out: out[0] if isinstance(out, tuple) else out,
+        aux_weight=0.1,
     )
-
-    # loss_t = criterion
-    # loss_i = criterion
 
     optimizer.zero_grad()
 
@@ -577,24 +588,11 @@ def train_one_epoch(
             src_input,  # goes to model.encode_sign
             tgt_input,  # goes to model.encode_text
         )
-        # with torch.amp.autocast("cuda"):
-        #     sim_text, sim_image, descript_loss = model(src_input, tgt_input)
-        #     loss_text = loss_t(sim_text, torch.arange(sim_text.size(0)).to(sim_text.device))
-        #     loss_image = loss_i(sim_image, torch.arange(sim_image.size(0)).to(sim_image.device))
-        #     total_loss = ((loss_text + loss_image) / 2.0) + (0.1 * descript_loss)
-        #
-        # loss_scaler(total_loss, optimizer)
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            _, descript_loss = model.encode_sign(src_input)
-            scaled_descript = 0.1 * descript_loss
-
-        scaled_descript.backward()
 
         optimizer.step()
         optimizer.zero_grad()
 
-        # loss_value = total_loss.item()
-        loss_value = contrastive_loss.item() + scaled_descript.item()
+        loss_value = contrastive_loss.item() + gc.last_aux_loss * 0.1
         if not math.isfinite(loss_value):
             print(f"Loss is {loss_value}, stopping training")
             sys.exit(1)
@@ -620,7 +618,7 @@ def evaluate(args, dev_dataloader, model, criterion, epoch, device="cuda"):
     loss_t = criterion
     loss_i = criterion
 
-    amp_enabled = (device.type == "cuda")
+    amp_enabled = device.type == "cuda"
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
             metric_logger.log_every(dev_dataloader, print_freq, header),

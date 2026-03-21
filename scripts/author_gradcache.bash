@@ -1,6 +1,7 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
+
+# pkill -9 -f "train_mmlp.py"
 
 export CUDA_VISIBLE_DEVICES=0
 
