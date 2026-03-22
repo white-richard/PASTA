@@ -217,7 +217,7 @@ def get_args_parser():
     )
     parser.add_argument(
         "--prefetch_factor",
-        default=2,
+        default=1,
         type=int,
         help="Number of prefetched batches per worker for training dataloader.",
     )
