@@ -3,6 +3,8 @@ set -euo pipefail
 
 # pkill -9 -f "train_mmlp.py"
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # One GPU
 export CUDA_VISIBLE_DEVICES=0
 
