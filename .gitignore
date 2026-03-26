@@ -17,6 +17,7 @@ out/
 pretrain_models/
 nlg-eval-temp/
 CLAUDE.md
+setup.fish
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
