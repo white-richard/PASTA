@@ -209,7 +209,7 @@ def get_args_parser():
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
 
-    parser.add_argument("--num_workers", default=8, type=int)
+    parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument(
         "--eval_num_workers",
         default=1,
@@ -329,7 +329,7 @@ def main(args, config) -> None:
         "pin_memory": pin_mem,
     }
     if args.num_workers > 0:
-        train_loader_kwargs["prefetch_factor"] = 2
+        train_loader_kwargs["prefetch_factor"] = 1
         train_loader_kwargs["persistent_workers"] = True
 
     eval_loader_kwargs = {
