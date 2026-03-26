@@ -9,11 +9,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUDA_VISIBLE_DEVICES=0
 
 # Set to 1 to enable a script, 0 to disable it.
-RUN_TRAIN_MMLP=0
+RUN_TRAIN_MMLP=1
 RUN_TRAIN_MMSLT=1
 
 # Shared configs
-VISION_BACKBONE="resnet18"
+VISION_BACKBONE="vit_base_patch16_clip_224.openai"
 # -----
 
 # Debug mode using `--debug` flag

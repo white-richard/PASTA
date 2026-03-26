@@ -61,9 +61,17 @@ uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v
 
 uv pip install -r requirements.txt
 
+uv pip install -r vlm2vev_requirements.txt
+
 uv pip install --upgrade "wandb>=0.19"
 
 git submodule update --init --recursive
+```
+
+When using vlm2vec2:
+
+```bash
+uv pip install -r vlm2vev_requirements.txt
 ```
 
 The `requirements.txt` references `nlg-eval-temp` via a relative path.

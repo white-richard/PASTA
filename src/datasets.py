@@ -164,7 +164,10 @@ class S2T_Dataset(Dataset):
         batch_image = []
         for i, img_path in enumerate(paths):
             img = cv2.imread(img_path)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            if img is None:
+                img = np.zeros((self.args.input_size, self.args.input_size, 3), dtype=np.uint8)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(img)
             batch_image.append(img)
 

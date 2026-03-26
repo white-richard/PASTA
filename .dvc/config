@@ -1,0 +1,6 @@
+[core]
+    autostage = true
+    remote = wpeb-print
+[cache]
+    type = "hardlink,symlink"
+    protected = true

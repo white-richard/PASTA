@@ -1,3 +1,4 @@
+setuptools
 python-lsp-server
 absl-py
 accelerate

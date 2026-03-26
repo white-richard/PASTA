@@ -1,0 +1,30 @@
+accelerate
+datasets
+decord
+einops
+# flash-attn  # check out orginal repo README for accelerating installation: https://github.com/Dao-AILab/flash-attention
+hjson
+hnswlib
+huggingface-hub
+ninja
+numpy
+opencv-contrib-python
+opencv-python
+peft
+pillow
+py-cpuinfo
+pytrec-eval
+qwen-vl-utils[decord]
+ray
+scikit-image
+scikit-learn
+scipy
+sentencepiece
+timm
+# torch
+# torchvision
+tqdm
+transformers
+wandb
+wrapt
+# https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl

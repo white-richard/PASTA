@@ -4,3 +4,6 @@
 [submodule "repos/perception_models"]
 	path = repos/perception_models
 	url = https://github.com/facebookresearch/perception_models.git
+[submodule "repos/vlm2vecv2"]
+	path = repos/vlm2vecv2
+	url = https://github.com/TIGER-AI-Lab/VLM2Vec.git
