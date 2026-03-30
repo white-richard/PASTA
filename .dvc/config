@@ -1,6 +1,18 @@
-[core]
-    autostage = true
-    remote = wpeb-print
 [cache]
     type = "hardlink,symlink"
     protected = true
+[core]
+    autostage = true
+    remote = wpeb-print
+
+['remote "home-desktop"']
+    url = ssh://richiewhite@home-desktop/home/richiewhite/.code/asl-llm/.dvc/cache
+
+['remote "wpeb-mary"']
+    url = ssh://richw@wpeb-mary/home/richw/.code/asl-llm/.dvc/cache
+
+['remote "wpeb-print"']
+    url = ssh://richw@wpeb-print/home/richw/.code/asl-llm/.dvc/cache
+
+['remote "wpeb-server"']
+    url = ssh://richw@wpeb-server/home/richw/.code/asl-llm/.dvc/cache
