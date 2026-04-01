@@ -22,7 +22,6 @@ import hpargparse
 import numpy as np
 import test as test
 
-# from sched import scheduler
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
@@ -32,27 +31,20 @@ import yaml
 from hpman.m import _
 from loguru import logger
 
-# *metric
-# *user-defined
 from models import MMSLT
 from sacrebleu.metrics import BLEU
 from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
-
-# *transformers
-from transformers import (
-    MBart50TokenizerFast,
-)
+from transformers import MBart50TokenizerFast
 
 from datasets import S2T_Dataset
+from datasets_asl import S2T_ASLDataset
 
 try:
     from nlgeval import compute_metrics
 except:
     print("Please install nlgeval package.")
 
-# *timm
-# global definition
 from definition import *
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler
@@ -65,203 +57,129 @@ def get_args_parser():
     parser.add_argument("--batch-size", default=16, type=int)
     parser.add_argument("--epochs", default=80, type=int)
 
-    # * distributed training parameters
     parser.add_argument("--world_size", default=1, type=int, help="number of distributed processes")
-    parser.add_argument(
-        "--dist_url", default="env://", help="url used to set up distributed training"
-    )
+    parser.add_argument("--dist_url", default="env://", help="url used to set up distributed training")
     parser.add_argument("--local_rank", default=0, type=int)
 
-    # * Finetuning params
     parser.add_argument("--finetune", default="", help="finetune from checkpoint")
 
-    # * Optimizer parameters
-    parser.add_argument(
-        "--opt", default="adamw", type=str, metavar="OPTIMIZER", help='Optimizer (default: "adamw"'
-    )
-    parser.add_argument(
-        "--opt-eps",
-        default=1.0e-09,
-        type=float,
-        metavar="EPSILON",
-        help="Optimizer Epsilon (default: 1.0e-09)",
-    )
-    parser.add_argument(
-        "--opt-betas",
-        default=[0.9, 0.98],
-        type=float,
-        nargs="+",
-        metavar="BETA",  # [0.9, 0.98]
-        help="Optimizer Betas (default: None, use opt default)",
-    )
-    parser.add_argument(
-        "--clip-grad",
-        type=float,
-        default=None,
-        metavar="NORM",
-        help="Clip gradient norm (default: None, no clipping)",
-    )
-    parser.add_argument(
-        "--momentum", type=float, default=0.9, metavar="M", help="SGD momentum (default: 0.9)"
-    )
-    parser.add_argument(
-        "--weight-decay",
-        type=float,
-        default=0.001,  # 0.001 is original
-        help="weight decay (default: 0.05)",
-    )
+    parser.add_argument("--opt", default="adamw", type=str, metavar="OPTIMIZER")
+    parser.add_argument("--opt-eps", default=1.0e-09, type=float, metavar="EPSILON")
+    parser.add_argument("--opt-betas", default=[0.9, 0.98], type=float, nargs="+", metavar="BETA")
+    parser.add_argument("--clip-grad", type=float, default=None, metavar="NORM")
+    parser.add_argument("--momentum", type=float, default=0.9, metavar="M")
+    parser.add_argument("--weight-decay", type=float, default=0.001)
 
-    # * Learning rate schedule parameters
-    parser.add_argument(
-        "--sched",
-        default="cosine",
-        type=str,
-        metavar="SCHEDULER",
-        help='LR scheduler (default: "cosine"',
-    )
-    parser.add_argument(
-        "--lr", type=float, default=1.0e-3, metavar="LR", help="learning rate (default: 5e-4)"
-    )
-    parser.add_argument(
-        "--lr-noise",
-        type=float,
-        nargs="+",
-        default=None,
-        metavar="pct, pct",
-        help="learning rate noise on/off epoch percentages",
-    )
-    parser.add_argument(
-        "--lr-noise-pct",
-        type=float,
-        default=0.67,
-        metavar="PERCENT",
-        help="learning rate noise limit percent (default: 0.67)",
-    )
-    parser.add_argument(
-        "--lr-noise-std",
-        type=float,
-        default=1.0,
-        metavar="STDDEV",
-        help="learning rate noise std-dev (default: 1.0)",
-    )
-    parser.add_argument(
-        "--warmup-lr",
-        type=float,
-        default=1e-6,
-        metavar="LR",
-        help="warmup learning rate (default: 1e-6)",
-    )
-    parser.add_argument(
-        "--min-lr",
-        type=float,
-        default=1.0e-08,
-        metavar="LR",
-        help="lower lr bound for cyclic schedulers that hit 0 (1e-5)",
-    )
+    parser.add_argument("--sched", default="cosine", type=str, metavar="SCHEDULER")
+    parser.add_argument("--lr", type=float, default=1.0e-3, metavar="LR")
+    parser.add_argument("--lr-noise", type=float, nargs="+", default=None, metavar="pct, pct")
+    parser.add_argument("--lr-noise-pct", type=float, default=0.67, metavar="PERCENT")
+    parser.add_argument("--lr-noise-std", type=float, default=1.0, metavar="STDDEV")
+    parser.add_argument("--warmup-lr", type=float, default=1e-6, metavar="LR")
+    parser.add_argument("--min-lr", type=float, default=1.0e-08, metavar="LR")
 
-    parser.add_argument(
-        "--decay-epochs", type=float, default=30, metavar="N", help="epoch interval to decay LR"
-    )
-    parser.add_argument(
-        "--warmup-epochs",
-        type=int,
-        default=0,
-        metavar="N",
-        help="epochs to warmup LR, if scheduler supports",
-    )
-    parser.add_argument(
-        "--cooldown-epochs",
-        type=int,
-        default=10,
-        metavar="N",
-        help="epochs to cooldown LR at min_lr, after cyclic schedule ends",
-    )
-    parser.add_argument(
-        "--patience-epochs",
-        type=int,
-        default=10,
-        metavar="N",
-        help="patience epochs for Plateau LR scheduler (default: 10",
-    )
-    parser.add_argument(
-        "--decay-rate",
-        "--dr",
-        type=float,
-        default=0.1,
-        metavar="RATE",
-        help="LR decay rate (default: 0.1)",
-    )
+    parser.add_argument("--decay-epochs", type=float, default=30, metavar="N")
+    parser.add_argument("--warmup-epochs", type=int, default=0, metavar="N")
+    parser.add_argument("--cooldown-epochs", type=int, default=10, metavar="N")
+    parser.add_argument("--patience-epochs", type=int, default=10, metavar="N")
+    parser.add_argument("--decay-rate", "--dr", type=float, default=0.1, metavar="RATE")
 
-    # * Baise params
     parser.add_argument("--output_dir", default="", help="path where to save, empty for no saving")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
-    parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
+    parser.add_argument("--start_epoch", default=0, type=int, metavar="N")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
-    parser.add_argument(
-        "--dist-eval", action="store_true", default=False, help="Enabling distributed evaluation"
-    )
+    parser.add_argument("--dist-eval", action="store_true", default=False)
     parser.add_argument("--num_workers", default=8, type=int)
-    parser.add_argument(
-        "--eval_num_workers",
-        default=1,
-        type=int,
-        help="Number of DataLoader workers for dev/test evaluation dataloaders. ",
-    )
-    parser.add_argument(
-        "--pin-mem",
-        action="store_true",
-        help="Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.",
-    )
-    parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
+    parser.add_argument("--eval_num_workers", default=1, type=int)
+    parser.add_argument("--pin-mem", action="store_true")
+    parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=True)
     parser.add_argument("--config", type=str, default="./configs/config_mmslt_phoenix.yaml")
-    parser.add_argument(
-        "--log-memory",
-        action="store_true",
-        help="Log process/CUDA memory periodically.",
-    )
+    parser.add_argument("--log-memory", action="store_true")
 
-    # *Drop out params
-    parser.add_argument(
-        "--drop", type=float, default=0.0, metavar="PCT", help="Dropout rate (default: 0.)"
-    )
-    parser.add_argument(
-        "--drop-path", type=float, default=0.1, metavar="PCT", help="Drop path rate (default: 0.1)"
-    )
+    parser.add_argument("--drop", type=float, default=0.0, metavar="PCT")
+    parser.add_argument("--drop-path", type=float, default=0.1, metavar="PCT")
 
-    # * data process params
     parser.add_argument("--input-size", default=224, type=int)
     parser.add_argument("--resize", default=256, type=int)
     parser.add_argument(
         "--backbone",
         type=str,
         default="resnet18",
-        help="timm model name to use as vision backbone (e.g. resnet18, vit_base_patch14_dinov2.lvd142m).",
+        help="timm model name to use as vision backbone",
     )
 
-    # * visualization
-    parser.add_argument("--visualize", action="store_true")
-
-    # * debug
     parser.add_argument(
-        "--debug_mode",
-        action="store_true",
-        help="Run in debug mode: only 1 epoch and 2 batches per split.",
+        "--dataset-name",
+        type=str,
+        default="asl",
+        choices=["phoenix", "asl"],
+        help="Which dataset pipeline to use.",
     )
+
+    parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--debug_mode", action="store_true")
 
     return parser
 
 
+def get_tokenizer_for_dataset(dataset_name: str):
+    if dataset_name == "asl":
+        src_lang = "en_XX"
+        tgt_lang = "en_XX"
+    else:
+        src_lang = "de_DE"
+        tgt_lang = "de_DE"
+
+    tokenizer = MBart50TokenizerFast.from_pretrained(
+        "facebook/mbart-large-50-many-to-many-mmt",
+        src_lang=src_lang,
+        tgt_lang=tgt_lang,
+        model_max_length=1024,
+    )
+    return tokenizer, tgt_lang
+
+
+def build_datasets(args, config, tokenizer):
+    if args.dataset_name == "asl":
+        dataset_cls = S2T_ASLDataset
+        dataset_path = None
+    else:
+        dataset_cls = S2T_Dataset
+        dataset_path = config["data"]["label_path"]
+
+    train_data = dataset_cls(
+        path=dataset_path,
+        tokenizer=tokenizer,
+        config=config,
+        args=args,
+        phase="train",
+    )
+    dev_data = dataset_cls(
+        path=dataset_path,
+        tokenizer=tokenizer,
+        config=config,
+        args=args,
+        phase="dev",
+    )
+    test_data = dataset_cls(
+        path=dataset_path,
+        tokenizer=tokenizer,
+        config=config,
+        args=args,
+        phase="test",
+    )
+    return train_data, dev_data, test_data
+
+
 def main(args, config):
-    # torch.multiprocessing.set_start_method('spawn')
     utils.init_distributed_mode(args)
     print(args)
 
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -269,38 +187,15 @@ def main(args, config):
     cudnn.benchmark = False
 
     print("Creating dataset:")
-    tokenizer = MBart50TokenizerFast.from_pretrained(
-        "facebook/mbart-large-50-many-to-many-mmt",
-        src_lang="de_DE",
-        tgt_lang="de_DE",
-        model_max_length=1024,
-    )
+    tokenizer, inferred_tgt_lang = get_tokenizer_for_dataset(args.dataset_name)
 
-    train_data = S2T_Dataset(
-        path=config["data"]["label_path"],
-        tokenizer=tokenizer,
-        config=config,
-        args=args,
-        phase="train",
-    )
+    # allow config override, else use inferred language
+    if "tgt_lang" not in config["data"]:
+        config["data"]["tgt_lang"] = inferred_tgt_lang
+
+    train_data, dev_data, test_data = build_datasets(args, config, tokenizer)
     print(train_data)
-
-    dev_data = S2T_Dataset(
-        path=config["data"]["label_path"],
-        tokenizer=tokenizer,
-        config=config,
-        args=args,
-        phase="dev",
-    )
     print(dev_data)
-
-    test_data = S2T_Dataset(
-        path=config["data"]["label_path"],
-        tokenizer=tokenizer,
-        config=config,
-        args=args,
-        phase="test",
-    )
     print(test_data)
 
     if args.distributed:
@@ -337,7 +232,7 @@ def main(args, config):
         dev_data,
         collate_fn=dev_data.collate_fn,
         sampler=dev_sampler if args.distributed else None,
-        shuffle=(args.distributed is False),
+        shuffle=False,
         **eval_loader_kwargs,
     )
 
@@ -345,12 +240,11 @@ def main(args, config):
         test_data,
         collate_fn=test_data.collate_fn,
         sampler=test_sampler if args.distributed else None,
-        shuffle=(args.distributed is False),
+        shuffle=False,
         **eval_loader_kwargs,
     )
 
     print("Creating model:")
-
     model = MMSLT(config, args, backbone=args.backbone)
     model.to(device)
 
@@ -381,7 +275,6 @@ def main(args, config):
         print("Missing keys: \n", "\n".join(ret.missing_keys))
         print("Unexpected keys: \n", "\n".join(ret.unexpected_keys))
 
-    # print(model)
     model_without_ddp = model
 
     if args.distributed:
@@ -390,6 +283,7 @@ def main(args, config):
             model, device_ids=[args.gpu], find_unused_parameters=False
         )
         model_without_ddp = model.module
+
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
 
@@ -408,6 +302,7 @@ def main(args, config):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"output_dir: {output_dir}")
+
     if args.resume:
         print("Resuming Model Parameters... ")
         checkpoint = torch.load(args.resume, map_location="cpu")
@@ -424,41 +319,17 @@ def main(args, config):
 
     if args.eval:
         if not args.resume:
-            logger.warning(
-                "Please specify the trained model: --resume /path/to/best_checkpoint.pth"
-            )
+            logger.warning("Please specify the trained model: --resume /path/to/best_checkpoint.pth")
         test_stats = evaluate(
-            args,
-            dev_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
+            args, dev_dataloader, model, model_without_ddp, tokenizer,
+            ce_criterion, config, UNK_IDX, SPECIAL_SYMBOLS, PAD_IDX, device,
         )
-        print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} "
-        )
+        print(f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}")
         test_stats = evaluate(
-            args,
-            test_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
+            args, test_dataloader, model, model_without_ddp, tokenizer,
+            ce_criterion, config, UNK_IDX, SPECIAL_SYMBOLS, PAD_IDX, device,
         )
-        print(
-            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}"
-        )
+        print(f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}")
         return
 
     if args.debug_mode:
@@ -468,20 +339,14 @@ def main(args, config):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         train_stats = train_one_epoch(
-            args,
-            model,
-            ce_criterion,
-            train_dataloader,
-            optimizer,
-            device,
-            epoch,
-            config,
-            loss_scaler,
+            args, model, ce_criterion, train_dataloader, optimizer,
+            device, epoch, config, loss_scaler,
         )
         lr_scheduler.step(epoch)
 
@@ -499,21 +364,10 @@ def main(args, config):
                 )
 
         test_stats = evaluate(
-            args,
-            dev_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
+            args, dev_dataloader, model, model_without_ddp, tokenizer,
+            ce_criterion, config, UNK_IDX, SPECIAL_SYMBOLS, PAD_IDX, device,
         )
-        print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}"
-        )
+        print(f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}")
 
         if max_accuracy < test_stats["belu4"]:
             max_accuracy = test_stats["belu4"]
@@ -554,50 +408,6 @@ def main(args, config):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-    # Last epoch
-    test_on_last_epoch = True
-    if test_on_last_epoch and args.output_dir:
-        test_model_path = output_dir / "best_checkpoint.pth"
-        if not test_model_path.exists():
-            test_model_path = output_dir / "checkpoint.pth"
-            print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
-        checkpoint = torch.load(test_model_path, map_location="cpu", weights_only=False)
-        model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
-
-        test_stats = evaluate(
-            args,
-            dev_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
-        )
-        print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}"
-        )
-
-        test_stats = evaluate(
-            args,
-            test_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
-        )
-        print(
-            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}"
-        )
-
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Training time {total_time_str}")
@@ -623,9 +433,7 @@ def train_one_epoch(
     header = f"Epoch: [{epoch}/{args.epochs}]"
     print_freq = 10
 
-    for step, (src_input, tgt_input) in enumerate(
-        metric_logger.log_every(data_loader, print_freq, header)
-    ):
+    for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         out_logits = model(src_input, tgt_input)
         label = tgt_input["input_ids"].reshape(-1)
         logits = out_logits.reshape(-1, out_logits.shape[-1])
@@ -652,10 +460,8 @@ def train_one_epoch(
             print("*** DEBUG MODE: stopping after 2 batches ***")
             break
 
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
-
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
@@ -680,9 +486,7 @@ def evaluate(
     tgt_refs = []
 
     with torch.no_grad():
-        for step, (src_input, tgt_input) in enumerate(
-            metric_logger.log_every(dev_dataloader, 10, header)
-        ):
+        for step, (src_input, tgt_input) in enumerate(metric_logger.log_every(dev_dataloader, 10, header)):
             out_logits = model(src_input, tgt_input)
             label = tgt_input["input_ids"].reshape(-1)
             logits = out_logits.reshape(-1, out_logits.shape[-1])
@@ -693,7 +497,7 @@ def evaluate(
                 src_input,
                 max_new_tokens=150,
                 num_beams=8,
-                forced_bos_token_id=tokenizer.lang_code_to_id["de_DE"],
+                forced_bos_token_id=tokenizer.lang_code_to_id[config["data"]["tgt_lang"]],
             )
             pred_texts = tokenizer.batch_decode(output.detach().cpu(), skip_special_tokens=True)
             ref_texts = tokenizer.batch_decode(tgt_input["input_ids"], skip_special_tokens=True)
@@ -707,9 +511,7 @@ def evaluate(
                 if torch.cuda.is_available():
                     alloc_gb = torch.cuda.memory_allocated(device) / (1024**3)
                     reserved_gb = torch.cuda.memory_reserved(device) / (1024**3)
-                    print(
-                        f"[memory] step={step + 1} rss={rss_gb} cuda_alloc={alloc_gb:.2f} GB cuda_reserved={reserved_gb:.2f} GB"
-                    )
+                    print(f"[memory] step={step + 1} rss={rss_gb} cuda_alloc={alloc_gb:.2f} GB cuda_reserved={reserved_gb:.2f} GB")
                 else:
                     print(f"[memory] step={step + 1} rss={rss_gb}")
 
@@ -742,6 +544,7 @@ def evaluate(
             no_glove=True,
         )
         print("*" * 80)
+
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 

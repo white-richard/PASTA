@@ -1,5 +1,6 @@
 name: MMSLT
 data:
+    tgt_lang: de_DE
     label_path:
         train: ../datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.train.corpus.csv
         dev: ../datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.dev.corpus.csv

@@ -1,0 +1,13 @@
+name: MMSLT_ASL
+
+data:
+  tgt_lang: en_XX
+  how2sign_root: /content/drive/MyDrive/datasets/how2sign-data
+  max_length: 300
+  descript_dim: 768
+  descript_feat_path: null
+  img_path: ""
+  label_path: null
+
+training:
+  wandb: disabled
