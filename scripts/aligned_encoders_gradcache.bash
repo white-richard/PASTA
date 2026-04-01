@@ -13,7 +13,7 @@ RUN_TRAIN_MMLP=1
 RUN_TRAIN_MMSLT=1
 
 # Shared configs
-VISION_BACKBONE="vit_base_patch16_clip_224.openai"
+VISION_BACKBONE="vit_base_patch16_clip_224.openai" # resnet18 | <some-timm-model>
 # -----
 
 # Debug mode using `--debug` flag
