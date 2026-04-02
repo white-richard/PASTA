@@ -1,20 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 # pkill -9 -f "train_mmlp.py"
-
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+source "$(dirname "$0")/lib/monitor_cmd.bash"
 
-# One GPU
-export CUDA_VISIBLE_DEVICES=0
-
+# === Shared configs ===
+VISION_BACKBONE="resnet18" # resnet18 | <some-timm-model> | vit_base_patch16_clip_224.openai
+export CUDA_VISIBLE_DEVICES=0 # One GPU
 # Set to 1 to enable a script, 0 to disable it.
 RUN_TRAIN_MMLP=1
 RUN_TRAIN_MMSLT=1
-
-# Shared configs
-VISION_BACKBONE="vit_base_patch16_clip_224.openai" # resnet18 | <some-timm-model>
-# -----
 
 # Debug mode using `--debug` flag
 DEBUG_MODE=${DEBUG_MODE:-0}
@@ -38,8 +33,10 @@ if [[ "${DEBUG_MODE}" -eq 1 ]]; then
   DEBUG_ARGS+=(--debug_mode)
 fi
 
+
+
 if [[ "${RUN_TRAIN_MMLP}" -eq 1 ]]; then
-  python src/train_mmlp.py \
+  monitor_cmd "train_mmlp" "pretrain_models/mmlp" python src/train_mmlp.py \
     --batch-size 16 \
     --epochs 80 \
     --opt adamw \
@@ -53,7 +50,7 @@ else
 fi
 
 if [[ "${RUN_TRAIN_MMSLT}" -eq 1 ]]; then
-  python src/train_mmslt.py \
+  monitor_cmd "train_mmslt" "out/mmslt" python src/train_mmslt.py \
     --batch-size 2 \
     --epochs 200 \
     --opt adamw \
