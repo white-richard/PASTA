@@ -27,14 +27,7 @@ datasets/phoenix-descript
 
 CSL requires a formal request; use Phoenix for reproducibility verification.
 
-### 2. Create virtual environment
-
-```bash
-uv venv --python 3.10
-source .venv/bin/activate
-```
-
-### 3. Patch `nlg-eval`
+### 2. Patch `nlg-eval`
 
 `gensim 3.8.3` cannot be compiled on Python 3.10 due to a removed NumPy build flag.
 Clone the dependency locally and relax its gensim version pin before installing:
@@ -49,28 +42,12 @@ git commit -am 'Relax gensim requirement to >=4.0.1 for Python 3.10 compatibilit
 cd ../..
 ```
 
-### 4. Install dependencies
+### 3. Install dependencies
 
 ```bash
-uv pip install --upgrade pip setuptools wheel packaging ninja
-
-uv pip install torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/cu124
-
-uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
-
-uv pip install -r requirements.txt
-
-uv pip install -r vlm2vev_requirements.txt
-
-uv pip install --upgrade "wandb>=0.19"
-
 git submodule update --init --recursive
-```
-
-When using vlm2vec2:
-
-```bash
+uv sync
+uv pip install -e repos/gradcache
 uv pip install -r vlm2vev_requirements.txt
 ```
 
