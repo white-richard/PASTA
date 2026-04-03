@@ -1,4 +1,6 @@
+import gzip
 import os
+import pickle
 import random
 
 import cv2
@@ -10,7 +12,6 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from vidaug import augmentors as va
 
-import utils
 from definition import *
 
 
@@ -87,7 +88,103 @@ class MissDataset(Dataset):
         return vid_name, frame_files
 
 
+def load_dataset_file(filename):
+    # Try gzip+pickle first (original format), fall back to Phoenix CSV
+    try:
+        with gzip.open(filename, "rb") as f:
+            return pickle.load(f)
+    except (OSError, gzip.BadGzipFile):
+        pass
+
+    # Phoenix CSV format: pipe-delimited with columns name|video|start|end|speaker|orth|translation
+    import csv
+    import glob as _glob
+
+    data = {}
+    # Infer split from filename
+    fname = os.path.basename(filename)
+    if "train" in fname:
+        split = "train"
+    elif "dev" in fname:
+        split = "dev"
+    elif "test" in fname:
+        split = "test"
+    else:
+        split = "train"
+
+    with open(filename, encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="|")
+        for row in reader:
+            name = row["name"].strip()
+            translation = row["translation"].strip()
+            # video col: e.g. "VideoName/1/*.png" — extract folder name
+            video_col = row["video"].strip()
+            video_name = video_col.split("/")[0]
+            # Expand glob relative to the image root (two levels up from annotations/manual)
+            annotations_dir = os.path.dirname(os.path.abspath(filename))
+            img_root = os.path.join(annotations_dir, "..", "..", "features", "fullFrame-210x260px")
+            frame_dir = os.path.join(img_root, split, video_name)
+            frames = sorted(_glob.glob(os.path.join(frame_dir, "*.png")))
+            if not frames:
+                continue
+            rel_frames = ["/" + os.path.relpath(f, img_root) for f in frames]
+            key = f"{split}/{video_name}"
+            data[key] = {
+                "name": name,
+                "text": translation,
+                "imgs_path": rel_frames,
+            }
+    return data
+
+
 # Datasets for MMLP and SLT
+def load_dataset_file(filename):
+    # Try gzip+pickle first (original format), fall back to Phoenix CSV
+    try:
+        with gzip.open(filename, "rb") as f:
+            return pickle.load(f)
+    except (OSError, gzip.BadGzipFile):
+        pass
+
+    # Phoenix CSV format: pipe-delimited with columns name|video|start|end|speaker|orth|translation
+    import csv
+    import glob as _glob
+
+    data = {}
+    # Infer split from filename
+    fname = os.path.basename(filename)
+    if "train" in fname:
+        split = "train"
+    elif "dev" in fname:
+        split = "dev"
+    elif "test" in fname:
+        split = "test"
+    else:
+        split = "train"
+
+    with open(filename, encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="|")
+        for row in reader:
+            name = row["name"].strip()
+            translation = row["translation"].strip()
+            # video col: e.g. "VideoName/1/*.png" — extract folder name
+            video_col = row["video"].strip()
+            video_name = video_col.split("/")[0]
+            # Expand glob relative to the image root (two levels up from annotations/manual)
+            annotations_dir = os.path.dirname(os.path.abspath(filename))
+            img_root = os.path.join(annotations_dir, "..", "..", "features", "fullFrame-210x260px")
+            frame_dir = os.path.join(img_root, split, video_name)
+            frames = sorted(_glob.glob(os.path.join(frame_dir, "*.png")))
+            if not frames:
+                continue
+            rel_frames = ["/" + os.path.relpath(f, img_root) for f in frames]
+            key = f"{split}/{video_name}"
+            data[key] = {
+                "name": name,
+                "text": translation,
+                "imgs_path": rel_frames,
+            }
+    return data
 
 
 class S2T_Dataset(Dataset):
@@ -95,7 +192,7 @@ class S2T_Dataset(Dataset):
         self.config = config
         self.args = args
 
-        self.raw_data = utils.load_dataset_file(path[phase])
+        self.raw_data = load_dataset_file(path[phase])
         self.tokenizer = tokenizer
         self.phase = phase
         # self.descript_feat = torch.load(config["data"]["descript_feat_path"][phase])
@@ -155,7 +252,7 @@ class S2T_Dataset(Dataset):
             paths = new_paths
 
         imgs = torch.zeros(len(paths), 3, self.args.input_size, self.args.input_size)
-        crop_rect, resize = utils.data_augmentation(
+        crop_rect, resize = data_augmentation(
             resize=(self.args.resize, self.args.resize),
             crop_size=self.args.input_size,
             is_train=(self.phase == "train"),

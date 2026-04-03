@@ -1,120 +1,84 @@
 import argparse
-import os
+import pathlib
 import signal
 import sys
 from collections import defaultdict
 
 import torch
-import torch.distributed as dist
 from PIL import Image
-from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from datasets import MissDataset, VideoDataset
 from llavaov import LLaVA
 
+torch.benchmark = True
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(False)
 
-def setup(rank, world_size) -> None:
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+
+def _checkpoint(frame_texts: dict, save_file: str) -> None:
+    text_dict = {
+        vid: {"texts": [frame_texts[vid][i] for i in sorted(frame_texts[vid])]}
+        for vid in frame_texts
+    }
+    torch.save(text_dict, save_file)
 
 
 def create_feature(args) -> None:
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    setup(rank, world_size)
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    batch_size = args.video_bs
-    frame_batch = args.frame_bs
+    chunk_size = args.chunk_size
     resume = args.resume
     split = args.split
     save_path = args.save_path
+    save_file = f"{save_path}phoenix_SLdescript.{split}"
+    debug_mode = args.debug_mode
 
-    if resume:
-        dataset = MissDataset(vars(args), split)
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    dataset = MissDataset(vars(args), split) if resume else VideoDataset(vars(args), split)
 
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            # shuffle=True,
-            sampler=sampler,
-            drop_last=False,
-            num_workers=16,
-        )
+    # Phase 1: collect all frame paths upfront
+    print("Collecting frame paths...")
+    all_entries = []  # (vid_name, frame_idx, frame_path)
+    for i in range(len(dataset)):
+        vid_name, frame_files = dataset[i]
+        for frame_idx, frame_path in enumerate(frame_files):
+            all_entries.append((vid_name, frame_idx, frame_path))
+        if debug_mode and i >= 1:
+            break
 
-    else:
-        dataset = VideoDataset(vars(args), split)
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    print(f"Total frames to process: {len(all_entries)}")
 
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            # shuffle=True,
-            sampler=sampler,
-            drop_last=False,
-            num_workers=16,
-        )
-
+    # Phase 2: vLLM inference in large chunks for maximum GPU utilization
     mmlm = LLaVA()
-    text_dict = defaultdict(dict)
-    cnt = 0
+    frame_texts: dict[str, dict[int, str]] = defaultdict(dict)
 
-    for batch in tqdm(dataloader):
-        # vid_name, images, image_sizes = batch
-        vid_name, image_paths = batch
-        images = [
-            Image.open(f[0]).convert("RGB") for f in image_paths
-        ]  # with CSL-Daily, add .resize((256,256))
-        vid_name = vid_name[0]
-        idx = [0]
-        for i in range(0, len(images), frame_batch):
-            slice = min(i + frame_batch, len(images))
-            idx.append(slice)
+    for chunk_num, start in enumerate(
+        tqdm(range(0, len(all_entries), chunk_size), desc="Processing chunks"),
+    ):
+        chunk = all_entries[start : start + chunk_size]
+        images = [Image.open(path).convert("RGB") for _, _, path in chunk]
 
-        vid_texts = []
-        # vid_lengths = []
-        for i in range(len(idx) - 1):
-            start, end = idx[i : i + 2]
-            frames = images[start:end]
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            texts = mmlm(images=images)
 
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                texts = mmlm(images=frames)
-            vid_texts.extend(texts)
-            # vid_lengths.extend(lengths)
+        for (vid_name, frame_idx, _), text in zip(chunk, texts, strict=False):
+            frame_texts[vid_name][frame_idx] = text
 
-        text_dict[vid_name]["texts"] = vid_texts
-        # text_dict[vid_name]['text_lengths'] = vid_lengths
+        if (chunk_num + 1) % 10 == 0:
+            _checkpoint(frame_texts, save_file)
+            print(f"Checkpoint saved at chunk {chunk_num + 1}.")
 
-        cnt += 1
-
-        if cnt % 100 == 0:  # save codebook in every 100 iteration (backup)
-            if resume:
-                torch.save(
-                    text_dict,
-                    f"{save_path}phoenix_SLdescript.{split}_{rank}",
-                )  # train, dev, test
-            else:
-                torch.save(
-                    text_dict,
-                    f"{save_path}phoenix_SLdescript.{split}_{rank}",
-                )  # train, dev, test
-
-            print(f"Saving features in {cnt} iteraion..")
-
-    if resume:
-        torch.save(text_dict, f"{save_path}phoenix_SLdescript.{split}_{rank}")
-    else:
-        torch.save(text_dict, f"{save_path}phoenix_SLdescript.{split}_{rank}")
-
+    # Phase 3: assemble final dict and save
+    text_dict = {
+        vid: {"texts": [frame_texts[vid][i] for i in sorted(frame_texts[vid])]}
+        for vid in frame_texts
+    }
+    torch.save(text_dict, save_file)
     print("Saving features complete!")
 
 
 def cleanup() -> None:
-    # Any cleanup code, e.g., free up CUDA memory
     torch.cuda.empty_cache()
     sys.exit(0)
 
@@ -128,30 +92,36 @@ signal.signal(signal.SIGINT, signal_handler)
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--ngpus', type=int, default=1, help='number of gpus used')
-    # parser.add_argument('--local_rank', type=int, default=0, help='rank of the current process')
     parser.add_argument(
         "--img_path",
         type=str,
-        default="path/to/datasets/",  # train, dev, test
+        default="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/",
         help="path to dataset folder",
     )
     parser.add_argument("--split", type=str, default="train", help="split")
     parser.add_argument(
-        "--frame_bs",
+        "--chunk-size",
         type=int,
-        default=8,
-        help="batch size of frames for LLaVA input",
+        default=2000,
+        help="number of frames per vLLM batch (larger = better GPU utilization)",
     )
-    parser.add_argument("--video_bs", type=int, default=1)
-    parser.add_argument("--resume", type=bool, default=False, help="resume generating features")
+    parser.add_argument("--video_bs", type=int, default=1)  # kept for MissDataset compat
+    parser.add_argument("--resume", action="store_true", help="resume generating features")
     parser.add_argument(
         "--save_path",
         type=str,
-        default="path/to/save/",
+        default="tmp/features/",
         help="path to save features",
     )
+    parser.add_argument(
+        "--debug-mode",
+        action="store_true",
+        help="stop after the second video",
+    )
     args = parser.parse_args()
+
+    save_path = pathlib.Path(args.save_path)
+    save_path.mkdir(parents=True, exist_ok=True)
 
     create_feature(args)
 

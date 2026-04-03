@@ -1,0 +1,10 @@
+transformers>=4.56.0,<5
+setuptools
+tqdm
+pillow
+torchvision
+vidaug
+numpy
+opencv-python
+scikit-image
+accelerate

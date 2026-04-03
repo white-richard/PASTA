@@ -1,23 +1,35 @@
-import torch
-import torch.nn as nn
-from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from torch import nn
+from transformers import AutoProcessor
+from vllm import LLM, SamplingParams
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class LLaVA(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        model_id: str = "llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        max_model_len: int = 8192,
+        max_tokens: int = 80,
+    ) -> None:
         super().__init__()
 
-        model_id = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
-        self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
-            model_id,
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True,
-            device_map=None,
-        ).cuda()
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.model_id = model_id
+        self.max_tokens = max_tokens
+        self.processor = AutoProcessor.from_pretrained(model_id, use_fast=False)
+        self.model = LLM(
+            model=model_id,
+            dtype="bfloat16",
+            max_model_len=max_model_len,
+        )
+        self.params = SamplingParams(max_tokens=max_tokens)
 
-    def forward(self, images):
-
+    def _build_prompt(self) -> str:
         conversation = [
             {
                 "role": "user",
@@ -25,24 +37,25 @@ class LLaVA(nn.Module):
                     {"type": "image"},
                     {
                         "type": "text",
-                        "text": "Describe only the motion and gestures of the person in the image focus on hands and face.",
+                        "text": (
+                            "Describe only the motion and gestures of the person "
+                            "in the image. Focus on hands and face."
+                        ),
                     },
                 ],
             },
         ]
-
-        prompt = self.processor.apply_chat_template(conversation, add_generation_prompt=True)
-        prompts = [prompt for _ in images]
-
-        inputs = self.processor(images=images, text=prompts, return_tensors="pt", padding=True).to(
-            self.model.device, torch.float16
+        return self.processor.apply_chat_template(
+            conversation,
+            add_generation_prompt=True,
         )
-        outputs = self.model.generate(
-            **inputs, max_new_tokens=256
-        )  # pad_token_id=self.processor.tokenizer.eos_token_id
-        texts = self.processor.batch_decode(
-            outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )
-        text = [t.split("assistant")[1] for t in texts]
 
-        return text
+    def forward(self, images: Iterable) -> list[str]:
+        images = list(images)
+        if not images:
+            return []
+
+        prompt = self._build_prompt()
+        inputs = [{"prompt": prompt, "multi_modal_data": {"image": image}} for image in images]
+        outputs = self.model.generate(inputs, sampling_params=self.params, use_tqdm=False)
+        return [output.outputs[0].text for output in outputs]
