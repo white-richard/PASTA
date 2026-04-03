@@ -16,6 +16,7 @@ class LLaVA(nn.Module):
         model_id: str = "llava-hf/llava-onevision-qwen2-7b-ov-hf",
         max_model_len: int = 8192,
         max_tokens: int = 80,
+        use_turboquant: bool = True,
     ) -> None:
         super().__init__()
 
@@ -26,6 +27,7 @@ class LLaVA(nn.Module):
             model=model_id,
             dtype="bfloat16",
             max_model_len=max_model_len,
+            attention_config={"backend": "CUSTOM"} if use_turboquant else None,
         )
         self.params = SamplingParams(max_tokens=max_tokens)
 

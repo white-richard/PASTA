@@ -1,8 +1,8 @@
-transformers>=4.56.0,<5
-setuptools
+#transformers>=4.56.0,<5
+#setuptools
 tqdm
 pillow
-torchvision
+#torchvision
 vidaug
 numpy
 opencv-python

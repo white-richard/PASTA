@@ -6,13 +6,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="$ROOT/desc-venv"
 
-echo "==> Installing vllm (auto-selects torch for installed CUDA version)"
-uv pip install --python "$VENV/bin/python" vllm --torch-backend=auto
+uv pip install --python "$VENV/bin/python" turboquant-vllm[vllm] --torch-backend=auto --index-strategy unsafe-best-match
+# uv pip install --python "$VENV/bin/python" vllm --torch-backend=auto
 
-# vllm 0.19.0 bug: ImageChunk moved from messages to chunk in mistral_common 1.10.0
-echo "==> Patching vllm pixtral.py (mistral_common 1.10+ import path)"
-sed -i 's/from mistral_common.protocol.instruct.messages import ImageChunk/from mistral_common.protocol.instruct.chunk import ImageChunk/' \
-  "$VENV/lib/python3.10/site-packages/vllm/model_executor/models/pixtral.py"
+# echo "==> Patching vllm pixtral.py (mistral_common 1.10+ import path)"
+# sed -i 's/from mistral_common.protocol.instruct.messages import ImageChunk/from mistral_common.protocol.instruct.chunk import ImageChunk/' \
+#   "$VENV/lib/python3.10/site-packages/vllm/model_executor/models/pixtral.py"
 
 echo "==> Installing remaining requirements"
 uv pip install --python "$VENV/bin/python" \

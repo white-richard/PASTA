@@ -44,7 +44,7 @@ def create_feature(args) -> None:
         vid_name, frame_files = dataset[i]
         for frame_idx, frame_path in enumerate(frame_files):
             all_entries.append((vid_name, frame_idx, frame_path))
-        if debug_mode and i >= 1:
+        if debug_mode and i >= 3:
             break
 
     print(f"Total frames to process: {len(all_entries)}")
