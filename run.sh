@@ -4,7 +4,7 @@ set -x
 
 # === Config ===
 RUN_SCRIPT="scripts/generate_descript_author.bash"
-OUTPUT_DIRS="out pretrain_models tmp"
+OUTPUT_DIRS="out pretrain_models"
 DVC_LOCAL_PUSH=0
 
 cd /workspace
