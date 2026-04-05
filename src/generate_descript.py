@@ -15,19 +15,29 @@ torch.benchmark = True
 torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_mem_efficient_sdp(True)
 torch.backends.cuda.enable_math_sdp(False)
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision("medium")
 
 
-def _checkpoint(frame_data: dict, save_file: str, extract_hidden_states: bool) -> None:
+def _checkpoint(
+    frame_data: dict,
+    frame_paths: dict,
+    save_file: str,
+    extract_hidden_states: bool,
+) -> None:
     if extract_hidden_states:
-        # frame_data[vid][frame_idx] = tensor [3584]
         feature_dict = {
-            vid: {"features": [frame_data[vid][i] for i in sorted(frame_data[vid])]}
+            vid: {
+                "features": [frame_data[vid][i] for i in sorted(frame_data[vid])],
+                "paths": [frame_paths[vid][i] for i in sorted(frame_paths[vid])],
+            }
             for vid in frame_data
         }
     else:
         feature_dict = {
-            vid: {"texts": [frame_data[vid][i] for i in sorted(frame_data[vid])]}
+            vid: {
+                "texts": [frame_data[vid][i] for i in sorted(frame_data[vid])],
+                "paths": [frame_paths[vid][i] for i in sorted(frame_paths[vid])],
+            }
             for vid in frame_data
         }
     torch.save(feature_dict, save_file)
@@ -63,6 +73,7 @@ def create_feature(args) -> None:
         hidden_state_layer=hidden_state_layer,
     )
     frame_data: dict[str, dict[int, str | torch.Tensor]] = defaultdict(dict)
+    frame_paths: dict[str, dict[int, str]] = defaultdict(dict)
 
     for chunk_num, start in enumerate(
         tqdm(range(0, len(all_entries), chunk_size), desc="Processing chunks"),
@@ -73,11 +84,12 @@ def create_feature(args) -> None:
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             outputs = mmlm(images=images)
 
-        for (vid_name, frame_idx, _), output in zip(chunk, outputs, strict=False):
+        for (vid_name, frame_idx, frame_path), output in zip(chunk, outputs, strict=False):
             frame_data[vid_name][frame_idx] = output
+            frame_paths[vid_name][frame_idx] = str(frame_path)
 
         if (chunk_num + 1) % 10 == 0:
-            _checkpoint(frame_data, save_file, extract_hidden_states)
+            _checkpoint(frame_data, frame_paths, save_file, extract_hidden_states)
             print(f"Checkpoint saved at chunk {chunk_num + 1}.")
 
         if debug_mode and chunk_num >= 10:
