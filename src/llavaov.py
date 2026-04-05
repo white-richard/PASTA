@@ -98,7 +98,7 @@ class LLaVA(nn.Module):
         # self.model(**inputs)
         # hook.remove()
         try:
-            self.model(**inputs)
+            self.model(**inputs, use_cache=False)
         except _EarlyExit:
             pass
         finally:
