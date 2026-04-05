@@ -88,14 +88,14 @@ def create_feature(args) -> None:
             frame_data[vid_name][frame_idx] = output
             frame_paths[vid_name][frame_idx] = str(frame_path)
 
-        if (chunk_num + 1) % 10 == 0:
+        if (chunk_num + 1) % 500 == 0:
             _checkpoint(frame_data, frame_paths, save_file, extract_hidden_states)
             print(f"Checkpoint saved at chunk {chunk_num + 1}.")
 
         if debug_mode and chunk_num >= 10:
             break
 
-    _checkpoint(frame_data, save_file, extract_hidden_states)
+    _checkpoint(frame_data, frame_paths, save_file, extract_hidden_states)
     print("Saving features complete!")
 
 

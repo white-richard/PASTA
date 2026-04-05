@@ -11,10 +11,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 
-class _EarlyExit(Exception):
-    pass
-
-
 class LLaVA(nn.Module):
     def __init__(
         self,
@@ -91,18 +87,12 @@ class LLaVA(nn.Module):
 
         def _hidden_state_hook(module, input, output) -> None:
             pooled_container.append(output)
-            raise _EarlyExit
 
         target_layer = self.model.language_model.layers[self.hidden_state_layer]
         hook = target_layer.register_forward_hook(_hidden_state_hook)
-        # self.model(**inputs)
-        # hook.remove()
-        try:
-            self.model(**inputs, use_cache=False)
-        except _EarlyExit:
-            pass
-        finally:
-            hook.remove()
+
+        self.model(**inputs, use_cache=False)
+        hook.remove()
 
         image_token_id = self.model.config.image_token_index
         hs = pooled_container[0]  # [B, seq_len, D]
