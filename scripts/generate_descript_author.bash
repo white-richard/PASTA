@@ -40,7 +40,11 @@ if [[ "${DEBUG_MODE}" -eq 1 ]]; then
 fi
 
 for split in "${splits[@]}"; do
-    monitor_cmd "generate_descript" "tmp" python src/generate_descript.py \
+    monitor_cmd "generate_descript" "tmp" \
+    python src/generate_descript.py \
     --split $split \
     "${DEBUG_ARGS[@]}"
+    if [[ "${DEBUG_MODE}" -eq 1 ]]; then
+        break
+    fi
 done

@@ -44,8 +44,6 @@ def create_feature(args) -> None:
         vid_name, frame_files = dataset[i]
         for frame_idx, frame_path in enumerate(frame_files):
             all_entries.append((vid_name, frame_idx, frame_path))
-        if debug_mode and i >= 3:
-            break
 
     print(f"Total frames to process: {len(all_entries)}")
 
@@ -68,6 +66,9 @@ def create_feature(args) -> None:
         if (chunk_num + 1) % 10 == 0:
             _checkpoint(frame_texts, save_file)
             print(f"Checkpoint saved at chunk {chunk_num + 1}.")
+
+        if debug_mode and i >= 3:
+            break
 
     # Phase 3: assemble final dict and save
     text_dict = {
@@ -98,7 +99,7 @@ def main() -> None:
         default="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/",
         help="path to dataset folder",
     )
-    parser.add_argument("--split", type=str, default="train", help="split") # train | dev | test
+    parser.add_argument("--split", type=str, default="train", help="split")  # train | dev | test
     parser.add_argument(
         "--chunk-size",
         type=int,
