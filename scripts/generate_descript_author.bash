@@ -10,13 +10,12 @@ if [[ ! -f "$VENV/bin/activate" ]]; then
   echo "Error: desc-venv not found. Run scripts/setup_descript_env.bash first."
   exit 1
 fi
-# shellcheck source=/dev/null
 source "$VENV/bin/activate"
-
 source "$(dirname "$0")/lib/monitor_cmd.bash"
+export CUDA_VISIBLE_DEVICES=0 # One GPU
 
 # === Shared configs ===
-export CUDA_VISIBLE_DEVICES=0 # One GPU
+splits=("train" "dev" "test")
 
 # Debug mode using `--debug` flag
 DEBUG_MODE=${DEBUG_MODE:-0}
@@ -40,6 +39,8 @@ if [[ "${DEBUG_MODE}" -eq 1 ]]; then
   DEBUG_ARGS+=(--debug-mode)
 fi
 
-monitor_cmd "generate_descript" "tmp" python src/generate_descript.py \
-"${DEBUG_ARGS[@]}"
-
+for split in "${splits[@]}"; do
+    monitor_cmd "generate_descript" "tmp" python src/generate_descript.py \
+    --split $split \
+    "${DEBUG_ARGS[@]}"
+done

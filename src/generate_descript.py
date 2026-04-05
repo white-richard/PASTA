@@ -98,7 +98,7 @@ def main() -> None:
         default="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/",
         help="path to dataset folder",
     )
-    parser.add_argument("--split", type=str, default="train", help="split")
+    parser.add_argument("--split", type=str, default="train", help="split") # train | dev | test
     parser.add_argument(
         "--chunk-size",
         type=int,

@@ -83,6 +83,24 @@ chmod +x scripts/reproduce_author.bash
 ./scripts/reproduce_author.bash
 ```
 
+## Generate Descriptions with vLLM and TurboQuant
+
+Install dependencies in a new venv:
+
+```bash
+uv venv --python 3.12 desc-venv
+bash scripts/setup_descript_env.bash
+source desc-venv/bin/activate
+```
+
+Run the code:
+
+```bash 
+scripts/generate_descript_author.bash
+```
+
+this runs over each split (train, dev, test).
+
 ## Notes
 
 - Text sign descriptions and weight files from MMSLT can be found in [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
