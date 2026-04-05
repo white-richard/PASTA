@@ -11,7 +11,7 @@ if [[ ! -f "$VENV/bin/activate" ]]; then
   exit 1
 fi
 source "$VENV/bin/activate"
-source "$(dirname "$0")/lib/monitor_cmd.bash"
+source "$(dirname "$0")/slib/monitor_cmd.bash"
 export CUDA_VISIBLE_DEVICES=0 # One GPU
 
 # === Shared configs ===

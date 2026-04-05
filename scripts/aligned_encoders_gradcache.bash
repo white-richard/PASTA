@@ -2,7 +2,7 @@
 set -euo pipefail
 # pkill -9 -f "train_mmlp.py"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-source "$(dirname "$0")/lib/monitor_cmd.bash"
+source "$(dirname "$0")/slib/monitor_cmd.bash"
 
 # === Shared configs ===
 VISION_BACKBONE="resnet18" # resnet18 | <some-timm-model> | vit_base_patch16_clip_224.openai
