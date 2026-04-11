@@ -240,7 +240,8 @@ dependencies = [
     "dvc_ssh",
     "vidaug @ git+https://github.com/okankop/vidaug@1c1ddf2640fe4a9171267d64ae5e3bd70c24d54a",
     "clip @ git+https://github.com/openai/CLIP.git@dcba3cb2e2827b402d2701e7e1c7d9fed8a20ef1",
-    "vllm"
+    "vllm",
+    "flamingo-pytorch"
 ]
 
 [tool.setuptools.packages.find]
