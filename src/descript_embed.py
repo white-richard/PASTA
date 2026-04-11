@@ -90,6 +90,7 @@ for k, v in tqdm(test.items()):
     new_test[k][feat_key] = encode(v)
 
 path = pathlib.Path("out") / path
+path.mkdir(parents=True, exist_ok=True)
 torch.save(new_train, path / f"phoenix_SLdescriptions_{args.encoder}_train.pt")
 torch.save(new_dev, path / f"phoenix_SLdescriptions_{args.encoder}_dev.pt")
 torch.save(new_test, path / f"phoenix_SLdescriptions_{args.encoder}_test.pt")
