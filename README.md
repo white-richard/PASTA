@@ -13,6 +13,7 @@ mkdir -p datasets
 cd datasets
 wget https://www-i6.informatik.rwth-aachen.de/ftp/pub/rwth-phoenix/2016/phoenix-2014-T.v3.tar.gz
 tar xzf phoenix-2014-T.v3.tar.gz
+rm phoenix-2014-T.v3.tar.gz
 cd ..
 ```
 
@@ -48,7 +49,6 @@ cd ../..
 git submodule update --init --recursive
 uv sync
 uv pip install -e repos/gradcache
-uv pip install -r vlm2vev_requirements.txt
 ```
 
 The `requirements.txt` references `nlg-eval-temp` via a relative path.
@@ -67,8 +67,7 @@ Before training, you must convert the raw LLaVA-generated text descriptions into
 3. Overwrites the same files with the enriched format: `{video_name: {'texts': [...], 'bert_feat': tensor}}`
 
 ```bash
-sudo apt install jupyter-core
-jupyter nbconvert --to notebook --execute --inplace src/descript_embed.ipynb
+python src/descript_embed.py
 ```
 
 ---
