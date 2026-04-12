@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--encoder",
     choices=["bert", "siglip"],
-    default="siglip",
+    default="bert",
     help="Text encoder to use: 'bert' (bert-base-cased) or 'siglip' (google/siglip-so400m-patch14-384)",
 )
 args = parser.parse_args()
