@@ -50,7 +50,7 @@ import utils
 from datasets import load_dataset_file
 from definition import *
 from grad_cache_util import (
-    GradCacheWithGrounding,
+    GradCache,
     contrastive_loss_fn,
     split_tgt_input,
 )
@@ -177,16 +177,29 @@ def split_gmmlp_input(model_input: dict, chunk_size: int) -> list[dict]:
 
 
 class GMMLPImageEncoder(nn.Module):
-    """SigLIP ViT (LoRA) + LLaVA projector + Perceiver Resampler.
+    """SigLIP / SigLIP2 ViT (LoRA) + projector + Perceiver Resampler.
 
-    forward() → (sentence_emb, grounding_loss)
-        sentence_emb:   (B, D_vit)  L2-normalised, for L_align
-        grounding_loss: scalar InfoNCE,              for L_ground (aux)
+    Supports two model families:
+      'llava'  — LLaVA-OneVision: SigLIP ViT + LLaVA MLP projector.
+      'gemma4' — Gemma 4: SigLIP2 ViT + Gemma MLP projector.
+
+    forward() → (sentence_emb, student_vid)
+        sentence_emb:  (B, D_vit)  L2-normalised Perceiver output, for L_align
+        student_vid:   (B, D_llm)  mean-pooled projected features,  for L_ground
     """
+
+    # Default plain-processor IDs (one crop per image, no pan-and-scan).
+    # Both LLaVA and Gemma4 use multi-crop processors by default; these IDs
+    # select the underlying ViT processor to avoid 5-D pixel_values tensors.
+    _DEFAULT_PROCESSOR: dict[str, str] = {
+        "llava": "google/siglip-so400m-patch14-384",
+        "gemma4": "google/siglip2-so400m-patch14-384",
+    }
 
     def __init__(
         self,
         model_id: str,
+        model_family: str,
         lora_r: int,
         lora_alpha: int,
         lora_dropout: float,
@@ -194,16 +207,11 @@ class GMMLPImageEncoder(nn.Module):
         num_media_embeds: int,
         vision_chunk_size: int,
         temperature: float,
+        image_processor_id: str | None = None,
     ) -> None:
         super().__init__()
         self.vision_chunk_size = vision_chunk_size
         self.temperature = temperature
-
-        base = LlavaOnevisionForConditionalGeneration.from_pretrained(
-            model_id,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-        )
 
         lora_cfg = LoraConfig(
             r=lora_r,
@@ -212,25 +220,48 @@ class GMMLPImageEncoder(nn.Module):
             target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
             bias="none",
         )
-        base.vision_tower = get_peft_model(base.vision_tower, lora_cfg)
-        # Gradient checkpointing cuts activation memory from O(n_layers) to
-        # O(1) at the cost of one extra forward per layer during backward.
-        base.vision_tower.gradient_checkpointing_enable()
 
-        self.vision_tower = base.vision_tower
-        self.projector = base.multi_modal_projector  # LLaVA MLP: D_vit → D_llm
+        if model_family == "llava":
+            base = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
+            # Gradient checkpointing cuts activation memory from O(n_layers) to
+            # O(1) at the cost of one extra forward per layer during backward.
+            base.vision_tower = get_peft_model(base.vision_tower, lora_cfg)
+            base.vision_tower.gradient_checkpointing_enable()
+            self.vision_tower = base.vision_tower
+            self.projector = base.multi_modal_projector  # LLaVA MLP: D_vit → D_llm
+            vit_hidden = base.config.vision_config.hidden_size  # 1152 for SigLIP-SO400M
+            del base
 
-        vit_hidden = base.config.vision_config.hidden_size  # 1152 for SigLIP-SO400M
+        elif model_family == "gemma4":
+            from transformers import Gemma4ForConditionalGeneration
+            base = Gemma4ForConditionalGeneration.from_pretrained(
+                model_id,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+            )
+            # Vision tower is nested one level deeper in Gemma4.
+            base.model.vision_tower = get_peft_model(base.model.vision_tower, lora_cfg)
+            base.model.vision_tower.gradient_checkpointing_enable()
+            self.vision_tower = base.model.vision_tower
+            self.projector = base.model.multi_modal_projector  # Gemma MLP: D_vit → D_llm
+            vit_hidden = base.config.vision_config.hidden_size
+            del base
 
-        # Use the plain SigLIP image processor — the full LlavaOnevision processor
-        # applies multi-crop preprocessing that outputs (B, 2, C, H, W) and uses
-        # 2× the GPU memory. AutoImageProcessor for the SigLIP model ID returns
-        # plain (B, C, 384, 384) tensors — exactly one crop per input image.
-        siglip_id = "google/siglip-so400m-patch14-384"
-        self._image_processor = AutoImageProcessor.from_pretrained(siglip_id)
+        else:
+            raise ValueError(f"Unknown model_family: {model_family!r}. Choose 'llava' or 'gemma4'.")
 
-        del base
         gc.collect()
+
+        # Use the plain ViT image processor — the full LLaVA / Gemma4 processor
+        # applies multi-crop preprocessing that outputs 5-D (B, N, C, H, W) tensors
+        # and uses N× the GPU memory. The standalone SigLIP / SigLIP2 processor
+        # returns plain (B, C, H, W) — exactly one crop per input image.
+        proc_id = image_processor_id or self._DEFAULT_PROCESSOR[model_family]
+        self._image_processor = AutoImageProcessor.from_pretrained(proc_id)
 
         self.perceiver = PerceiverResampler(
             dim=vit_hidden,
@@ -309,6 +340,7 @@ class GMMLP(nn.Module):
         super().__init__()
         self.model_image = GMMLPImageEncoder(
             model_id=args.model_id,
+            model_family=args.model_family,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
@@ -316,6 +348,7 @@ class GMMLP(nn.Module):
             num_media_embeds=args.num_media_embeds,
             vision_chunk_size=args.vision_chunk_size,
             temperature=args.temperature,
+            image_processor_id=args.image_processor_id or None,
         )
         self.model_text = GMMLPTextEncoder()
         self.lambda_ground = args.lambda_ground
@@ -392,6 +425,30 @@ def get_args_parser():
 
     # Model
     parser.add_argument("--model_id", default="llava-hf/llava-onevision-qwen2-7b-ov-hf")
+    parser.add_argument(
+        "--model_family",
+        choices=["llava", "gemma4"],
+        default="llava",
+        help=(
+            "Model family to use as the visual backbone. "
+            "'llava' (default): LLaVA-OneVision — SigLIP ViT + LLaVA MLP projector. "
+            "'gemma4': Gemma 4 — SigLIP2 ViT + Gemma MLP projector. "
+            "Set --model_id to the matching HuggingFace repo "
+            "(e.g. 'google/gemma-4-4b-it' for gemma4)."
+        ),
+    )
+    parser.add_argument(
+        "--image_processor_id",
+        type=str,
+        default="",
+        help=(
+            "Override the image processor used to preprocess frames. "
+            "Defaults to the plain ViT processor for each family "
+            "('google/siglip-so400m-patch14-384' for llava, "
+            "'google/siglip2-so400m-patch14-384' for gemma4). "
+            "Override when using a different SigLIP2 resolution variant."
+        ),
+    )
     parser.add_argument("--lora_r", type=int, default=16)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
@@ -489,7 +546,7 @@ def train_one_epoch(
     print_freq = 10
 
     chunk_size = args.grad_chunk_size if args.grad_chunk_size is not None else args.batch_size
-    gc = GradCacheWithGrounding(
+    gc = GradCache(
         img_encoder=model.model_image,
         txt_encoder=model.model_text,
         img_chunk_size=chunk_size,

@@ -9,7 +9,6 @@ from PIL import Image
 from tqdm import tqdm
 
 from datasets import MissDataset, VideoDataset
-from llavaov import LLaVA
 
 torch.benchmark = True
 torch.backends.cuda.enable_flash_sdp(True)
@@ -68,10 +67,26 @@ def create_feature(args) -> None:
 
     print(f"Total frames to process: {len(all_entries)}")
 
-    mmlm = LLaVA(
-        extract_hidden_states=extract_hidden_states,
-        hidden_state_layer=hidden_state_layer,
-    )
+    _FAMILY_DEFAULT_ID = {
+        "llava": "llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        "gemma4": "google/gemma-4-4b-it",
+    }
+    model_id = args.model_id or _FAMILY_DEFAULT_ID[args.model_family]
+
+    if args.model_family == "llava":
+        from llavaov import LLaVA
+        mmlm = LLaVA(
+            model_id=model_id,
+            extract_hidden_states=extract_hidden_states,
+            hidden_state_layer=hidden_state_layer,
+        )
+    else:  # gemma4
+        from gemma4 import Gemma4
+        mmlm = Gemma4(
+            model_id=model_id,
+            extract_hidden_states=extract_hidden_states,
+            hidden_state_layer=hidden_state_layer,
+        )
     frame_data: dict[str, dict[int, str | torch.Tensor]] = defaultdict(dict)
     frame_paths: dict[str, dict[int, str]] = defaultdict(dict)
 
@@ -119,6 +134,25 @@ def main() -> None:
         default="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/",
     )
     parser.add_argument("--split", type=str, default="train")
+    parser.add_argument(
+        "--model_family",
+        choices=["llava", "gemma4"],
+        default="llava",
+        help=(
+            "MLLM backbone for frame description / hidden-state extraction. "
+            "'llava' (default): LLaVA-OneVision. 'gemma4': Gemma 4."
+        ),
+    )
+    parser.add_argument(
+        "--model_id",
+        type=str,
+        default="",
+        help=(
+            "HuggingFace model ID. Defaults to "
+            "'llava-hf/llava-onevision-qwen2-7b-ov-hf' for llava and "
+            "'google/gemma-4-4b-it' for gemma4."
+        ),
+    )
     parser.add_argument("--chunk-size", type=int, default=2000)
     parser.add_argument("--video_bs", type=int, default=1)
     parser.add_argument("--resume", action="store_true")

@@ -16,9 +16,14 @@ torch.cuda.is_available()
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--encoder",
-    choices=["bert", "siglip"],
+    choices=["bert", "siglip", "siglip2"],
     default="bert",
-    help="Text encoder to use: 'bert' (bert-base-cased) or 'siglip' (google/siglip-so400m-patch14-384)",
+    help=(
+        "Text encoder to use: "
+        "'bert' (bert-base-cased), "
+        "'siglip' (google/siglip-so400m-patch14-384), "
+        "'siglip2' (google/siglip2-so400m-patch14-384 — matches Gemma4's image space)."
+    ),
 )
 args = parser.parse_args()
 
@@ -41,6 +46,26 @@ if args.encoder == "siglip":
     tokenizer = SiglipTokenizer.from_pretrained(SIGLIP_MODEL_ID)
     model = SiglipTextModel.from_pretrained(SIGLIP_MODEL_ID)
     feat_key = "siglip_feat"
+
+    def encode(texts):
+        inputs = tokenizer(
+            texts,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=64,
+            truncation=True,
+        )
+        with torch.no_grad():
+            outputs = model(input_ids=inputs["input_ids"].to(device))
+        return outputs.pooler_output.cpu()
+
+elif args.encoder == "siglip2":
+    from transformers import AutoTokenizer, SiglipTextModel
+
+    SIGLIP2_MODEL_ID = "google/siglip2-so400m-patch14-384"
+    tokenizer = AutoTokenizer.from_pretrained(SIGLIP2_MODEL_ID)
+    model = SiglipTextModel.from_pretrained(SIGLIP2_MODEL_ID)
+    feat_key = "siglip2_feat"
 
     def encode(texts):
         inputs = tokenizer(
