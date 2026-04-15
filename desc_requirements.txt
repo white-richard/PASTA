@@ -10,3 +10,4 @@ scikit-image
 accelerate
 dvc
 dvc_ssh
+bitsandbytes>=0.46.1
