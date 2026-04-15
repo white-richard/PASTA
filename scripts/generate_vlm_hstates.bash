@@ -24,7 +24,7 @@ splits=("train" "dev" "test")
 
 # Debug mode using `--debug` flag
 DEBUG_MODE=${DEBUG_MODE:-0}
-DEBUG_MODE=1
+
 MODEL_FAMILY="gemma4"
 MODEL_ID="unsloth/gemma-4-26B-A4B-it-GGUF" # cyankiwi/gemma-4-31B-it-AWQ-4bit | google/gemma-4-E2B-it | unsloth/gemma-4-E4B-it-GGUF | unsloth/gemma-4-26B-A4B-it-GGUF
 # HF model for hidden-state extraction; must be a standard (non-GGUF) repo
@@ -71,12 +71,18 @@ if [[ -n "${HF_MODEL_ID}" ]]; then
   MODEL_ARGS+=(--hf-model-id "${HF_MODEL_ID}")
 fi
 
+# if host home is not set, default to home directory
+if [[ -z "${HOST_HOME:-}" ]]; then
+    HOST_HOME="$HOME"
+fi
+
 for split in "${splits[@]}"; do
     monitor_cmd "generate_descript" "tmp" \
     python src/generate_descript.py \
     --split $split \
     --chunk-size=29 \
     --extract-hidden-states \
+    --save_path $HOST_HOME \
     "${MODEL_ARGS[@]}" \
     "${DEBUG_ARGS[@]}"
     if [[ "${DEBUG_MODE}" -eq 1 ]]; then

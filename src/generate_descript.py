@@ -26,7 +26,8 @@ def _checkpoint(
     if extract_hidden_states:
         feature_dict = {
             vid: {
-                "features": [frame_data[vid][i] for i in sorted(frame_data[vid])],
+                "features": [frame_data[vid][i][0] for i in sorted(frame_data[vid])],
+                "features_last": [frame_data[vid][i][1] for i in sorted(frame_data[vid])],
                 "paths": [frame_paths[vid][i] for i in sorted(frame_paths[vid])],
             }
             for vid in frame_data

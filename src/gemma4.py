@@ -138,28 +138,34 @@ class Gemma4(nn.Module):
             padding=True,
         ).to(device)
 
-        # Hook-based extraction: only one layer's tensor is ever live in VRAM,
+        # Hook-based extraction: only two layers' tensors are ever live in VRAM,
         # unlike output_hidden_states=True which materialises all N+1 layers.
         # Since torch.compile is not used here, hooks have no graph-break cost.
-        pooled_container: list[torch.Tensor] = []
+        mid_container: list[torch.Tensor] = []
+        last_container: list[torch.Tensor] = []
 
-        def _hidden_state_hook(module, input, output) -> None:
-            # output may be a tuple (hidden, ...) depending on layer type.
-            hs = output[0] if isinstance(output, tuple) else output
-            pooled_container.append(hs)
+        def _make_hook(container):
+            def _hook(module, input, output) -> None:
+                # output may be a tuple (hidden, ...) depending on layer type.
+                hs = output[0] if isinstance(output, tuple) else output
+                container.append(hs)
+            return _hook
 
         # Gemma4ForConditionalGeneration
         #   .model          → Gemma4Model
         #   .language_model → Gemma4TextModel
         #   .layers[N]      → Gemma4TextDecoderLayer
-        target_layer = self.model.model.language_model.layers[self.hidden_state_layer]
-        hook = target_layer.register_forward_hook(_hidden_state_hook)
+        layers = self.model.model.language_model.layers
+        hook_mid = layers[self.hidden_state_layer].register_forward_hook(_make_hook(mid_container))
+        hook_last = layers[-1].register_forward_hook(_make_hook(last_container))
         try:
             self.model(**inputs, use_cache=False)
         finally:
-            hook.remove()
+            hook_mid.remove()
+            hook_last.remove()
 
-        hs = pooled_container[0]  # (B, seq_len, D)
+        mid_hs = mid_container[0]   # (B, seq_len, D)
+        last_hs = last_container[0]  # (B, seq_len, D)
 
         # image_token_index is the standard name; fall back to image_token_id if needed.
         image_token_id = getattr(
@@ -175,8 +181,9 @@ class Gemma4(nn.Module):
             positions = (inputs["input_ids"][b] == image_token_id).nonzero(as_tuple=True)[0]
             n_visual = len(positions)
             img_start = positions[0].item()
-            visual_hs = hs[b, img_start : img_start + n_visual, :]  # (n_visual, D)
-            results.append(visual_hs.mean(dim=0).cpu())  # (D,)
+            mid_visual = mid_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()   # (D,)
+            last_visual = last_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()  # (D,)
+            results.append((mid_visual, last_visual))
 
         return results
 

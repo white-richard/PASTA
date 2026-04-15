@@ -73,7 +73,7 @@ class LLaVA(nn.Module):
         )
 
     @torch.no_grad()
-    def _forward_hidden_states(self, images: list) -> list[torch.Tensor]:
+    def _forward_hidden_states(self, images: list) -> list[tuple[torch.Tensor, torch.Tensor]]:
         device = next(self.model.parameters()).device
 
         inputs = self.processor(
@@ -83,27 +83,36 @@ class LLaVA(nn.Module):
             padding=True,
         ).to(device)
 
-        pooled_container: list[torch.Tensor] = []
+        mid_container: list[torch.Tensor] = []
+        last_container: list[torch.Tensor] = []
 
-        def _hidden_state_hook(module, input, output) -> None:
-            pooled_container.append(output)
+        def _make_hook(container):
+            def _hook(module, input, output) -> None:
+                container.append(output)
+            return _hook
 
-        target_layer = self.model.language_model.layers[self.hidden_state_layer]
-        hook = target_layer.register_forward_hook(_hidden_state_hook)
+        layers = self.model.language_model.layers
+        hook_mid = layers[self.hidden_state_layer].register_forward_hook(_make_hook(mid_container))
+        hook_last = layers[-1].register_forward_hook(_make_hook(last_container))
 
-        self.model(**inputs, use_cache=False)
-        hook.remove()
+        try:
+            self.model(**inputs, use_cache=False)
+        finally:
+            hook_mid.remove()
+            hook_last.remove()
 
         image_token_id = self.model.config.image_token_index
-        hs = pooled_container[0]  # [B, seq_len, D]
+        mid_hs = mid_container[0]   # [B, seq_len, D]
+        last_hs = last_container[0]  # [B, seq_len, D]
 
         results = []
         for b in range(len(images)):
             img_start = (
                 (inputs["input_ids"][b] == image_token_id).nonzero(as_tuple=True)[0][0].item()
             )
-            visual_hs = hs[b, img_start : img_start + 729, :]  # [729, D]
-            results.append(visual_hs.mean(dim=0).cpu())  # [D]
+            mid_visual = mid_hs[b, img_start : img_start + 729, :].mean(dim=0).cpu()   # [D]
+            last_visual = last_hs[b, img_start : img_start + 729, :].mean(dim=0).cpu()  # [D]
+            results.append((mid_visual, last_visual))
 
         return results
 
