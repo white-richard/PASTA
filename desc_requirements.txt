@@ -8,3 +8,5 @@ numpy
 opencv-python
 scikit-image
 accelerate
+dvc
+dvc_ssh
