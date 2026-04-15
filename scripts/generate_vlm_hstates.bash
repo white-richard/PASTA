@@ -24,6 +24,7 @@ splits=("train" "dev" "test")
 
 # Debug mode using `--debug` flag
 DEBUG_MODE=${DEBUG_MODE:-0}
+DEBUG_MODE=1
 MODEL_FAMILY="gemma4"
 MODEL_ID="unsloth/gemma-4-26B-A4B-it-GGUF" # cyankiwi/gemma-4-31B-it-AWQ-4bit | google/gemma-4-E2B-it | unsloth/gemma-4-E4B-it-GGUF | unsloth/gemma-4-26B-A4B-it-GGUF
 # HF model for hidden-state extraction; must be a standard (non-GGUF) repo
