@@ -83,7 +83,6 @@ for split in "${splits[@]}"; do
     --split $split \
     --chunk-size=29 \
     --extract-hidden-states \
-    --save_path $HOST_HOME \
     "${MODEL_ARGS[@]}" \
     "${DEBUG_ARGS[@]}"
     if [[ "${DEBUG_MODE}" -eq 1 ]]; then
