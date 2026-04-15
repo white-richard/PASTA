@@ -55,7 +55,7 @@ def create_feature(args) -> None:
     debug_mode = args.debug_mode
 
     suffix = f"hidden_layer{hidden_state_layer}" if extract_hidden_states else "SLdescript"
-    save_file = f"{save_path}phoenix_{suffix}_{split}.pt"
+    save_file = save_path / f"phoenix_{suffix}_{split}.pt"
 
     dataset = MissDataset(vars(args), split) if resume else VideoDataset(vars(args), split)
 
@@ -183,7 +183,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    pathlib.Path(args.save_path).mkdir(parents=True, exist_ok=True)
+    args.save_path = pathlib.Path(args.save_path)
+    args.save_path.mkdir(parents=True, exist_ok=True)
+    print(f"Features will be saved to: {args.save_path}")
     create_feature(args)
 
 
