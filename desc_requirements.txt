@@ -5,7 +5,7 @@ pillow
 #torchvision
 vidaug
 numpy
-opencv-python
+opencv-python-headless
 scikit-image
 accelerate
 dvc

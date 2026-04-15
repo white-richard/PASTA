@@ -130,7 +130,7 @@ dependencies = [
     "nvidia-nvtx-cu11",
     "oauthlib",
     "omegaconf",
-    "opencv-python",
+    "opencv-python-headless",
     "opt-einsum",
     "ordereddict",
     "overrides",
