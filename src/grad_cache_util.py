@@ -2,9 +2,8 @@ from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
-
 from grad_cache.grad_cache import GradCache
+from torch import Tensor, nn
 
 
 def split_src_input(model_input, chunk_size):
@@ -42,7 +41,7 @@ def split_src_input(model_input, chunk_size):
             max_len = int(new_lens.max())
             mask = torch.zeros(len(new_lens), max_len, dtype=torch.long)
             for i, l in enumerate(new_lens):
-                mask[i, :int(l)] = 1
+                mask[i, : int(l)] = 1
             chunk["attention_mask"] = mask
 
         chunks.append(chunk)
@@ -98,9 +97,10 @@ class DictInputWrapper(nn.Module):
 
 class GradCacheWithAux(GradCache):
     """GradCache subclass that backprops auxiliary losses (e.g. descript mse_loss)
-    captured by DictInputWrapper during the forward_backward pass."""
+    captured by DictInputWrapper during the forward_backward pass.
+    """
 
-    def __init__(self, *args, aux_weight=0.1, **kwargs):
+    def __init__(self, *args, aux_weight=0.1, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.aux_weight = aux_weight
         self.last_aux_loss = 0.0
@@ -123,7 +123,11 @@ class GradCacheWithAux(GradCache):
             sync_contexts = [nullcontext for _ in range(len(model_inputs))]
 
         for x, state, gradient, sync_context in zip(
-            model_inputs, random_states, cached_gradients, sync_contexts, strict=False
+            model_inputs,
+            random_states,
+            cached_gradients,
+            sync_contexts,
+            strict=False,
         ):
             with sync_context():
                 with state:

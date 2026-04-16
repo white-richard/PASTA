@@ -76,6 +76,7 @@ def create_feature(args) -> None:
 
     if args.model_family == "llava":
         from llavaov import LLaVA
+
         mmlm = LLaVA(
             model_id=model_id,
             extract_hidden_states=extract_hidden_states,
@@ -83,6 +84,7 @@ def create_feature(args) -> None:
         )
     else:  # gemma4
         from gemma4 import Gemma4
+
         mmlm = Gemma4(
             model_id=model_id,
             hf_model_id=args.hf_model_id or model_id,

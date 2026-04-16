@@ -1,4 +1,5 @@
 import os
+
 os.environ["USE_TF"] = "0"
 
 # GMMLP — Stage 1 Grounding Pretraining
@@ -17,6 +18,7 @@ os.environ["USE_TF"] = "0"
 
 import argparse
 import datetime
+import gc
 import json
 import math
 import random
@@ -43,8 +45,6 @@ from torch import nn
 from torch.backends import cudnn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoImageProcessor, LlavaOnevisionForConditionalGeneration
-
-import gc
 
 import utils
 from datasets import load_dataset_file
@@ -238,6 +238,7 @@ class GMMLPImageEncoder(nn.Module):
 
         elif model_family == "gemma4":
             from transformers import Gemma4ForConditionalGeneration
+
             base = Gemma4ForConditionalGeneration.from_pretrained(
                 model_id,
                 torch_dtype=torch.bfloat16,
@@ -252,7 +253,8 @@ class GMMLPImageEncoder(nn.Module):
             del base
 
         else:
-            raise ValueError(f"Unknown model_family: {model_family!r}. Choose 'llava' or 'gemma4'.")
+            msg = f"Unknown model_family: {model_family!r}. Choose 'llava' or 'gemma4'."
+            raise ValueError(msg)
 
         gc.collect()
 
@@ -322,7 +324,7 @@ class GMMLPImageEncoder(nn.Module):
         sentence_embs: list[torch.Tensor] = []
         for vis_patches in all_vis_patches:
             out = self.perceiver(vis_patches.unsqueeze(0))  # (1, T_i, K, D_vit)
-            sentence_embs.append(out.mean(dim=(1, 2)))      # (1, D_vit)
+            sentence_embs.append(out.mean(dim=(1, 2)))  # (1, D_vit)
         sentence_emb = F.normalize(torch.cat(sentence_embs, dim=0), dim=-1)  # (B, D_vit)
 
         return sentence_emb, student_vid

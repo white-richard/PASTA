@@ -6,13 +6,13 @@ import random
 
 import torch
 import torch.nn.functional as F
+from flamingo_pytorch import PerceiverResampler
 from peft import LoraConfig, get_peft_model
 from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
-from flamingo_pytorch import PerceiverResampler
 
 from load_descript_features import load_descript_features
 
@@ -200,14 +200,14 @@ def train(args: argparse.Namespace) -> None:
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
     ).to(device)
-    
-    perceiver = PerceiverResampler(
-        dim = 1024,        # D_vit from SigLIP
-        depth = 2,         # number of cross-attention layers
-        dim_head = 64,
-        heads = 8,
-        num_latents = 64,  # your K
-        num_time_embeds = 16  # your T
+
+    PerceiverResampler(
+        dim=1024,  # D_vit from SigLIP
+        depth=2,  # number of cross-attention layers
+        dim_head=64,
+        heads=8,
+        num_latents=64,  # your K
+        num_time_embeds=16,  # your T
     )
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

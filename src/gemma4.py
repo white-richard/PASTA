@@ -54,7 +54,7 @@ class Gemma4(nn.Module):
                 if hasattr(ip, attr):
                     setattr(ip, attr, do_image_splitting)
         if extract_hidden_states:
-            from accelerate import init_empty_weights, infer_auto_device_map
+            from accelerate import infer_auto_device_map, init_empty_weights
             from transformers import AutoConfig, BitsAndBytesConfig, Gemma4ForConditionalGeneration
 
             quant_config = BitsAndBytesConfig(
@@ -149,6 +149,7 @@ class Gemma4(nn.Module):
                 # output may be a tuple (hidden, ...) depending on layer type.
                 hs = output[0] if isinstance(output, tuple) else output
                 container.append(hs)
+
             return _hook
 
         # Gemma4ForConditionalGeneration
@@ -164,7 +165,7 @@ class Gemma4(nn.Module):
             hook_mid.remove()
             hook_last.remove()
 
-        mid_hs = mid_container[0]   # (B, seq_len, D)
+        mid_hs = mid_container[0]  # (B, seq_len, D)
         last_hs = last_container[0]  # (B, seq_len, D)
 
         # image_token_index is the standard name; fall back to image_token_id if needed.
@@ -181,7 +182,7 @@ class Gemma4(nn.Module):
             positions = (inputs["input_ids"][b] == image_token_id).nonzero(as_tuple=True)[0]
             n_visual = len(positions)
             img_start = positions[0].item()
-            mid_visual = mid_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()   # (D,)
+            mid_visual = mid_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()  # (D,)
             last_visual = last_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()  # (D,)
             results.append((mid_visual, last_visual))
 

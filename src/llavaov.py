@@ -89,6 +89,7 @@ class LLaVA(nn.Module):
         def _make_hook(container):
             def _hook(module, input, output) -> None:
                 container.append(output)
+
             return _hook
 
         layers = self.model.language_model.layers
@@ -102,7 +103,7 @@ class LLaVA(nn.Module):
             hook_last.remove()
 
         image_token_id = self.model.config.image_token_index
-        mid_hs = mid_container[0]   # [B, seq_len, D]
+        mid_hs = mid_container[0]  # [B, seq_len, D]
         last_hs = last_container[0]  # [B, seq_len, D]
 
         results = []
@@ -110,7 +111,7 @@ class LLaVA(nn.Module):
             img_start = (
                 (inputs["input_ids"][b] == image_token_id).nonzero(as_tuple=True)[0][0].item()
             )
-            mid_visual = mid_hs[b, img_start : img_start + 729, :].mean(dim=0).cpu()   # [D]
+            mid_visual = mid_hs[b, img_start : img_start + 729, :].mean(dim=0).cpu()  # [D]
             last_visual = last_hs[b, img_start : img_start + 729, :].mean(dim=0).cpu()  # [D]
             results.append((mid_visual, last_visual))
 

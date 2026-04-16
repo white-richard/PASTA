@@ -44,6 +44,6 @@ if __name__ == "__main__":
     print(
         f"Frame counts  : min={min(v.shape[0] for v in feats.values())}  "
         f"max={max(v.shape[0] for v in feats.values())}  "
-        f"mean={sum(v.shape[0] for v in feats.values()) / len(feats):.1f}"
+        f"mean={sum(v.shape[0] for v in feats.values()) / len(feats):.1f}",
     )
     print(f"Example       : '{sample_vid}'  shape={tuple(sample_tensor.shape)}")
