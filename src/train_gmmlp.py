@@ -301,7 +301,7 @@ class GMMLPImageEncoder(nn.Module):
         return torch.cat(vis_list, dim=0), torch.cat(proj_list, dim=0)
 
     def forward(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return (sentence_emb, student_vid) — both used by GradCacheWithGrounding.
+        """Return (sentence_emb, student_vid).
 
         sentence_emb : (B, D_vit)  L2-normalised Perceiver output, for L_align.
         student_vid  : (B, D_llm)  mean-pooled projected ViT GAP, for L_ground.
@@ -488,7 +488,7 @@ def get_args_parser():
         help=(
             "Objective for L_ground. "
             "'mse': MSE on L2-normalised student vs teacher (works for any chunk size). "
-            "'infonce': symmetric InfoNCE — GradCacheWithGrounding accumulates the full "
+            "'infonce': symmetric InfoNCE — GradCache accumulates the full "
             "batch before computing the loss, so the effective batch size equals "
             "--batch-size regardless of --grad_chunk_size."
         ),
