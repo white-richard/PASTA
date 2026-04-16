@@ -50,7 +50,7 @@ import utils
 from datasets import load_dataset_file
 from definition import *
 from grad_cache_util import (
-    GradCache,
+    GradCacheWithGrounding,
     contrastive_loss_fn,
     split_tgt_input,
 )
@@ -334,7 +334,10 @@ class GMMLPTextEncoder(nn.Module):
     """Pass-through for pre-extracted, mean-pooled SigLIP sentence embeddings."""
 
     def forward(self, tgt_input: dict) -> torch.Tensor:
-        return F.normalize(tgt_input["siglip_feat"].cuda().float(), dim=-1)
+        feat = tgt_input["siglip_feat"].float()
+        if torch.cuda.is_available():
+            feat = feat.cuda()
+        return F.normalize(feat, dim=-1)
 
 
 class GMMLP(nn.Module):
@@ -548,7 +551,7 @@ def train_one_epoch(
     print_freq = 10
 
     chunk_size = args.grad_chunk_size if args.grad_chunk_size is not None else args.batch_size
-    gc = GradCache(
+    gc = GradCacheWithGrounding(
         img_encoder=model.model_image,
         txt_encoder=model.model_text,
         img_chunk_size=chunk_size,

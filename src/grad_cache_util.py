@@ -176,3 +176,192 @@ def contrastive_loss_fn(sign_reps, text_reps, tau=0.07):
     loss_s2t = F.cross_entropy(sim, targets)
     loss_t2s = F.cross_entropy(sim.T, targets)
     return (loss_s2t + loss_t2s) / 2.0
+
+
+def _symmetric_info_nce(a: Tensor, b: Tensor, temperature: float = 0.07) -> Tensor:
+    """Symmetric InfoNCE between (N, D) L2-normalised tensors."""
+    logits = a @ b.T / temperature
+    labels = torch.arange(len(a), device=a.device)
+    return (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+
+
+class _AlignOnlyWrapper(nn.Module):
+    """Thin wrapper around GMMLPImageEncoder for alignment-only GradCache.
+
+    Returns sentence_emb only (drops student_vid). Used for the InfoNCE
+    grounding path where the grounding loss is computed in a separate pass
+    after the alignment GradCache step.
+
+    Not a DictInputWrapper subclass so GradCacheWithAux treats it as a plain
+    encoder (no aux-loss side-channel).
+    """
+
+    def __init__(self, img_encoder: nn.Module) -> None:
+        super().__init__()
+        self.model = img_encoder
+        # Dummy param anchors the output to the autograd graph even when the
+        # LoRA-adapted ViT has no non-frozen params with requires_grad.
+        self.dummy = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+    def forward(self, **kwargs) -> Tensor:
+        out = self.model(kwargs)  # (sentence_emb, student_vid)
+        sentence_emb = out[0] if isinstance(out, tuple) else out
+        return sentence_emb + 0.0 * self.dummy.sum()
+
+
+class _GroundingAuxWrapper(DictInputWrapper):
+    """Wraps GMMLPImageEncoder to compute MSE grounding loss as a per-chunk aux loss.
+
+    Used with GradCacheWithAux for the 'mse' grounding path.
+
+    forward(**kwargs) → sentence_emb  (for GradCache's contrastive alignment)
+
+    Side-effect during the with-grad second pass:
+        Computes MSE(normalize(student_vid), normalize(kwargs["grounding_feats"]))
+        and appends to self.aux_losses. GradCacheWithAux then backpropagates
+        this loss scaled by aux_weight (= lambda_ground).
+
+    MSE is per-sample separable, so computing it per chunk and averaging is
+    mathematically equivalent to computing it on the full batch.
+    """
+
+    def __init__(
+        self,
+        img_encoder: nn.Module,
+        temperature: float,  # kept for API symmetry; unused for MSE
+    ) -> None:
+        super().__init__(img_encoder)
+        self.temperature = temperature
+
+    def forward(self, **kwargs) -> Tensor:
+        out = self.model(kwargs)  # (sentence_emb, student_vid)
+        sentence_emb, student_vid = out
+        sentence_emb = sentence_emb + 0.0 * self.dummy.sum()
+
+        if torch.is_grad_enabled():
+            device, dtype = student_vid.device, student_vid.dtype
+            teacher = F.normalize(
+                kwargs["grounding_feats"].to(device, dtype=dtype), dim=-1
+            )
+            student_norm = F.normalize(student_vid, dim=-1)
+            self.aux_losses.append(F.mse_loss(student_norm, teacher))
+
+        return sentence_emb  # sentence_emb only — not a tuple
+
+
+class GradCacheWithGrounding:
+    """Gradient-cached training step for GMMLP combining L_align and L_ground.
+
+    L_align (contrastive InfoNCE, sentence_emb vs siglip_feat):
+        Always handled by GradCache via GradCacheWithAux.  The image encoder
+        is called in chunks; representations are assembled into a full-batch
+        contrastive loss whose gradient is cached and replayed.
+
+    L_ground (student_vid vs pre-extracted grounding_feats):
+        'mse'     — MSE per chunk, backpropagated as an aux loss inside the
+                    GradCache second pass (_GroundingAuxWrapper).  MSE is
+                    separable across samples so per-chunk averaging is exact.
+        'infonce' — Full-batch InfoNCE.  After the alignment GradCache pass,
+                    a separate chunked forward collects all student_vids, then
+                    InfoNCE is computed on the full batch and backpropagated.
+                    This ensures all negative pairs are in scope, matching the
+                    intent described in the argument help text.
+
+    __call__(src_input, tgt_input) → (align_val: float, ground_val: float)
+        Both values are unscaled (lambda_ground not applied); the caller is
+        responsible for scaling ground_val when computing a display loss.
+    """
+
+    def __init__(
+        self,
+        img_encoder: nn.Module,
+        txt_encoder: nn.Module,
+        img_chunk_size: int,
+        txt_chunk_size: int,
+        align_loss_fn,
+        split_src_fn,
+        split_tgt_fn,
+        lambda_ground: float,
+        temperature: float,
+        ground_loss_type: str,
+        device: torch.device,
+    ) -> None:
+        self.img_encoder = img_encoder
+        self.img_chunk_size = img_chunk_size
+        self.split_src_fn = split_src_fn
+        self.lambda_ground = lambda_ground
+        self.temperature = temperature
+        self.ground_loss_type = ground_loss_type
+        self.device = device
+
+        txt_wrapper = DictInputWrapper(txt_encoder)
+
+        def _split_fn(inp, cs):
+            if "images" in inp:
+                return split_src_fn(inp, cs)
+            return split_tgt_fn(inp, cs)
+
+        def _align_fn(a, b):
+            return align_loss_fn(a, b, temperature)
+
+        if ground_loss_type == "mse":
+            # MSE is separable — compute per-chunk as an aux loss.
+            self._img_wrapper: nn.Module = _GroundingAuxWrapper(img_encoder, temperature)
+            aux_weight = lambda_ground
+        else:
+            # InfoNCE grounding needs full-batch negatives; handled separately.
+            self._img_wrapper = _AlignOnlyWrapper(img_encoder)
+            aux_weight = 0.0
+
+        self._gc = GradCacheWithAux(
+            models=[self._img_wrapper, txt_wrapper],
+            chunk_sizes=[img_chunk_size, txt_chunk_size],
+            loss_fn=_align_fn,
+            split_input_fn=_split_fn,
+            get_rep_fn=lambda out: out[0] if isinstance(out, tuple) else out,
+            aux_weight=aux_weight,
+            device=device,
+        )
+
+    def __call__(self, src_input: dict, tgt_input: dict) -> tuple[float, float]:
+        """Run one training step.
+
+        Returns:
+            align_val:  Unscaled alignment InfoNCE loss (float).
+            ground_val: Unscaled grounding loss (float).
+        """
+        align_loss = self._gc(src_input, tgt_input)
+        align_val = align_loss.item()
+
+        if self.ground_loss_type == "mse":
+            # MSE already backpropagated inside GradCache; just read the value.
+            ground_val = float(self._gc.last_aux_loss)
+        else:
+            # InfoNCE grounding: separate full-batch pass (gradient accumulation).
+            ground_val = self._run_infonce_grounding(src_input)
+
+        return align_val, ground_val
+
+    def _run_infonce_grounding(self, src_input: dict) -> float:
+        """Collect all student_vids, compute full-batch InfoNCE, backpropagate.
+
+        Called only when ground_loss_type == 'infonce'. Gradients from this
+        pass accumulate on top of those already placed by the alignment GradCache
+        step; optimizer.step() applies both together.
+        """
+        chunks = self.split_src_fn(src_input, self.img_chunk_size)
+
+        all_student_vids: list[Tensor] = []
+        for chunk in chunks:
+            _, student_vid = self.img_encoder(chunk)
+            all_student_vids.append(student_vid)
+
+        student_vid_full = torch.cat(all_student_vids, dim=0)
+        device, dtype = student_vid_full.device, student_vid_full.dtype
+        teacher = F.normalize(
+            src_input["grounding_feats"].to(device, dtype=dtype), dim=-1
+        )
+        student_norm = F.normalize(student_vid_full, dim=-1)
+        ground_loss = _symmetric_info_nce(student_norm, teacher, self.temperature)
+        (self.lambda_ground * ground_loss).backward()
+        return ground_loss.detach().item()
