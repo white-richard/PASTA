@@ -50,7 +50,8 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --weight-decay 0.05 \
   --warmup-epochs 2 \
   --output_dir out/gmmlp \
-  --model_id "llava-hf/llava-onevision-qwen2-7b-ov-hf" \
+  --model_id "google/gemma-4-4b-it" \
+  --model_family gemma4 \
   --lora_r 16 \
   --lora_alpha 32 \
   --num_latents 64 \
@@ -59,7 +60,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --grad_chunk_size 1 \
   --temperature 0.07 \
   --lambda_ground 0.1 \
-  --ground_loss_type mse \
+  --ground_loss_type infonce \
   --grounding_feat_dir "${GROUNDING_DIR}" \
   --grounding_hidden_layer "${GROUNDING_LAYER}" \
   --siglip_feat_train "${SIGLIP_TRAIN}" \
