@@ -40,6 +40,8 @@ echo "=== Installing dependencies ==="
 
 uv pip install --python "$VENV/bin/python" turboquant-vllm[vllm] --torch-backend=auto --index-strategy unsafe-best-match
 
+uv pip install -e repos/gradcache
+
 uv pip install --python "$VENV/bin/python" \
   -r "$ROOT/desc_requirements.txt" \
   --torch-backend=auto
