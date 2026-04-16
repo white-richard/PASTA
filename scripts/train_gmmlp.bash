@@ -14,9 +14,9 @@ source "$(dirname "$0")/slib/monitor_cmd.bash"
 export CUDA_VISIBLE_DEVICES=0
 
 # --- Feature paths ---
-GROUNDING_DIR="out/descript/features/"
+GROUNDING_DIR="datasets/phoenix-descript/hidden_states_gemma_4_26B_A4B_it_GGUF"
 GROUNDING_LAYER=20
-SIGLIP_DIR="out/datasets/text_phoenix-descript"
+SIGLIP_DIR="datasets/phoenix-descript"
 SIGLIP_TRAIN="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip_train.pt"
 SIGLIP_DEV="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip_dev.pt"
 SIGLIP_TEST="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip_test.pt"
@@ -50,7 +50,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --weight-decay 0.05 \
   --warmup-epochs 2 \
   --output_dir out/gmmlp \
-  --model_id "google/gemma-4-4b-it" \
+  --model_id "google/gemma-4-E2B-it" \
   --model_family gemma4 \
   --lora_r 16 \
   --lora_alpha 32 \
