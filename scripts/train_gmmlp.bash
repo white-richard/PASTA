@@ -50,7 +50,7 @@ if [[ "${DEBUG_MODE}" -eq 1 ]]; then
 fi
 
 monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
-  --batch-size 32 \
+  --batch-size 64 \
   --epochs 20 \
   --opt adamw \
   --lr 1e-4 \
@@ -64,10 +64,10 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --num_latents 64 \
   --num_media_embeds 512 \
   --vision_chunk_size 8 \
-  --grad_chunk_size 8 \
+  --grad_chunk_size 32 \
   --temperature 0.07 \
   --lambda_ground 0.1 \
-  --ground_loss_type infonce \
+  --ground_loss_type mse \
   --grounding_feat_dir "${GROUNDING_DIR}" \
   --grounding_hidden_layer "${GROUNDING_LAYER}" \
   --siglip_feat_train "${SIGLIP_TRAIN}" \

@@ -213,10 +213,10 @@ class GMMLPImageEncoder(nn.Module):
     ) -> None:
         super().__init__()
         # Gemma4VisionModel's _position_embeddings creates a (B, max_patches, 2,
-        # position_embedding_size=10240) one-hot tensor — ~100 MB per image at
-        # bfloat16. Cap chunk to 1 and limit max_soft_tokens so the tensor fits
-        # in VRAM alongside the language model weights.
-        self.vision_chunk_size = 1 if model_family == "gemma4" else vision_chunk_size
+        # position_embedding_size=10240) one-hot tensor — ~180 MB per image at
+        # bfloat16. The full LLM (base) is del'd after init so VRAM is free;
+        # batching 8 frames costs ~1.4 GB which fits on any ≥16 GB GPU.
+        self.vision_chunk_size = vision_chunk_size
         # 70 soft tokens × pooling_kernel_size²=9 → 630 patches → ~400×400 equivalent;
         # ~24 MB one-hot vs ~788 MB at default 280. Must be in (70, 140, 280, 560, 1120).
         self.gemma4_max_soft_tokens = 70 if model_family == "gemma4" else None
@@ -309,49 +309,6 @@ class GMMLPImageEncoder(nn.Module):
         else:
             self.align_proj = None
 
-    def _encode_video(
-        self,
-        pil_frames: list[Image.Image],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode one video's frames.
-
-        Returns:
-            vis_patches: (T, P, D_vit)  patch features for Perceiver
-            proj_mean:   (T, D_llm)     mean-pooled projected features for L_ground
-
-        """
-        device = next(self.parameters()).device
-        dtype = next(self.parameters()).dtype
-
-        # During a grad-enabled forward (backward pass), cap frame count so that
-        # gradient-checkpoint storage (≈23 MB/frame) doesn't exhaust VRAM.
-        if torch.is_grad_enabled() and len(pil_frames) > self.max_frames_with_grad:
-            step = len(pil_frames) / self.max_frames_with_grad
-            pil_frames = [pil_frames[int(i * step)] for i in range(self.max_frames_with_grad)]
-
-        vis_list, proj_list = [], []
-        for i in range(0, len(pil_frames), self.vision_chunk_size):
-            chunk = pil_frames[i : i + self.vision_chunk_size]
-            proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
-            if self.gemma4_max_soft_tokens is not None:
-                proc_kwargs["max_soft_tokens"] = self.gemma4_max_soft_tokens
-            inputs = self._image_processor(**proc_kwargs).to(device)
-            pv = inputs["pixel_values"].to(dtype)
-            pos_ids = inputs.get(
-                "image_position_ids",
-            )  # (c, num_patches, 2) for Gemma4; None for SigLIP
-            vis = self.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
-            # Gemma4VisionModel strips padding and flattens the batch dimension,
-            # returning (total_valid_patches, D). Reshape back to (c, p, D).
-            if vis.dim() == 2:
-                c = len(chunk)
-                p = vis.shape[0] // c
-                vis = vis.view(c, p, vis.shape[-1])
-            proj = self.projector(vis)  # (c, P, D_llm)
-            vis_list.append(vis)
-            proj_list.append(proj.mean(dim=1))  # (c, D_llm)
-        return torch.cat(vis_list, dim=0), torch.cat(proj_list, dim=0)
-
     def forward(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (sentence_emb, student_vid).
 
@@ -360,24 +317,63 @@ class GMMLPImageEncoder(nn.Module):
         Both are computed from the same ViT forward pass.
         """
         images_batch = src_input["images"]
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
 
-        all_vis_patches: list[torch.Tensor] = []
-        all_proj_mean: list[torch.Tensor] = []
-
+        # Cap frames per video in both grad and no-grad passes: keeps the no-grad
+        # representation consistent with the grad pass and bounds ViT call count.
+        capped_batch: list[list[Image.Image]] = []
         for vid_frames in images_batch:
-            vis_patches, proj_mean = self._encode_video(vid_frames)
-            all_vis_patches.append(vis_patches)
-            all_proj_mean.append(proj_mean)
+            if len(vid_frames) > self.max_frames_with_grad:
+                step = len(vid_frames) / self.max_frames_with_grad
+                vid_frames = [vid_frames[int(i * step)] for i in range(self.max_frames_with_grad)]
+            capped_batch.append(vid_frames)
 
-        # student_vid: video-level mean-pooled projected features for L_ground
-        student_vid = torch.stack([p.mean(dim=0) for p in all_proj_mean])  # (B, D_llm)
+        video_lengths = [len(f) for f in capped_batch]
+        flat_frames = [f for frames in capped_batch for f in frames]
 
-        # sentence_emb: Perceiver over full frame sequence, pooled to one vector
+        # Encode all frames across all videos in a single chunk loop.
+        # GAP-pool patches immediately so we never hold (T*B, P, D_vit) in VRAM.
+        vis_pooled_list: list[torch.Tensor] = []
+        proj_pooled_list: list[torch.Tensor] = []
+        for i in range(0, len(flat_frames), self.vision_chunk_size):
+            chunk = flat_frames[i : i + self.vision_chunk_size]
+            proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
+            if self.gemma4_max_soft_tokens is not None:
+                proc_kwargs["max_soft_tokens"] = self.gemma4_max_soft_tokens
+            inputs = self._image_processor(**proc_kwargs).to(device)
+            pv = inputs["pixel_values"].to(dtype)
+            # (c, num_patches, 2) for Gemma4; None for SigLIP
+            pos_ids = inputs.get("image_position_ids")
+            vis = self.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
+            # Gemma4VisionModel strips padding and flattens the batch dimension,
+            # returning (total_valid_patches, D). Reshape back to (c, p, D).
+            if vis.dim() == 2:
+                c = len(chunk)
+                vis = vis.view(c, vis.shape[0] // c, vis.shape[-1])
+            proj = self.projector(vis)                 # (c, P, D_llm)
+            vis_pooled_list.append(vis.mean(dim=1))    # (c, D_vit) — GAP over patches
+            proj_pooled_list.append(proj.mean(dim=1))  # (c, D_llm)
+
+        all_vis = torch.cat(vis_pooled_list, dim=0)    # (total_frames, D_vit)
+        all_proj = torch.cat(proj_pooled_list, dim=0)  # (total_frames, D_llm)
+
+        # Split by video, run Perceiver inline so patch tensors are freed per video.
         sentence_embs: list[torch.Tensor] = []
-        for vis_patches in all_vis_patches:
-            out = self.perceiver(vis_patches.unsqueeze(0))  # (1, T_i, K, D_vit)
+        proj_means: list[torch.Tensor] = []
+        start = 0
+        for length in video_lengths:
+            vis_frames = all_vis[start : start + length]    # (T, D_vit)
+            proj_frames = all_proj[start : start + length]  # (T, D_llm)
+            # (1, T, 1, D_vit): media=T frames, 1 token each — uses temporal pos embs.
+            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D_vit)
             sentence_embs.append(out.mean(dim=(1, 2)))  # (1, D_vit)
+            proj_means.append(proj_frames.mean(dim=0))  # (D_llm,)
+            start += length
+
         sentence_emb = torch.cat(sentence_embs, dim=0)  # (B, D_vit)
+        student_vid = torch.stack(proj_means)            # (B, D_llm)
+
         if self.align_proj is not None:
             sentence_emb = self.align_proj(sentence_emb)  # (B, align_dim)
         sentence_emb = F.normalize(sentence_emb, dim=-1)
@@ -623,6 +619,7 @@ def train_one_epoch(
 
     optimizer.zero_grad()
     loss_value = 0.0
+    amp_enabled = device.type == "cuda"
 
     for step, (src_input, tgt_input) in enumerate(
         tqdm(
@@ -635,7 +632,8 @@ def train_one_epoch(
             print("DEBUG MODE: stopping after 2 batches.")
             break
 
-        align_val, ground_val = gc(src_input, tgt_input)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled):
+            align_val, ground_val = gc(src_input, tgt_input)
         optimizer.step()
         optimizer.zero_grad()
 
