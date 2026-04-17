@@ -10,6 +10,13 @@
 set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$(dirname "$0")/slib/monitor_cmd.bash"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VENV_DIR="${SCRIPT_DIR}/../.venv"
+source "${VENV_DIR}/bin/activate"
+
+# Add venv nvidia libs to LD_LIBRARY_PATH so pip-installed CUDA wheels resolve correctly
+_nvidia_lib_dirs=$(find "${VENV_DIR}/lib/python3.12/site-packages/nvidia" -maxdepth 2 -name "lib" -type d 2>/dev/null | tr '\n' ':')
+export LD_LIBRARY_PATH="${_nvidia_lib_dirs}${LD_LIBRARY_PATH:-}"
 
 export CUDA_VISIBLE_DEVICES=0
 
@@ -43,8 +50,8 @@ if [[ "${DEBUG_MODE}" -eq 1 ]]; then
 fi
 
 monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
-  --batch-size 4 \
-  --epochs 40 \
+  --batch-size 32 \
+  --epochs 20 \
   --opt adamw \
   --lr 1e-4 \
   --weight-decay 0.05 \
@@ -57,7 +64,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --num_latents 64 \
   --num_media_embeds 512 \
   --vision_chunk_size 8 \
-  --grad_chunk_size 1 \
+  --grad_chunk_size 8 \
   --temperature 0.07 \
   --lambda_ground 0.1 \
   --ground_loss_type infonce \
@@ -67,5 +74,5 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --siglip_feat_dev   "${SIGLIP_DEV}" \
   --siglip_feat_test  "${SIGLIP_TEST}" \
   --num_workers 4 \
-  --eval_num_workers 2 \
+  --eval_num_workers 4 \
   "${DEBUG_ARGS[@]}"

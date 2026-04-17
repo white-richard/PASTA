@@ -20,7 +20,6 @@ import argparse
 import datetime
 import gc
 import json
-import math
 import random
 import resource
 import sys
@@ -44,6 +43,7 @@ from timm.scheduler import create_scheduler
 from torch import nn
 from torch.backends import cudnn
 from torch.utils.data import DataLoader, Dataset
+from tqdm import tqdm
 from transformers import AutoImageProcessor, LlavaOnevisionForConditionalGeneration
 
 import utils
@@ -188,12 +188,13 @@ class GMMLPImageEncoder(nn.Module):
         student_vid:   (B, D_llm)  mean-pooled projected features,  for L_ground
     """
 
-    # Default plain-processor IDs (one crop per image, no pan-and-scan).
-    # Both LLaVA and Gemma4 use multi-crop processors by default; these IDs
-    # select the underlying ViT processor to avoid 5-D pixel_values tensors.
+    # Default processor IDs. LLaVA uses the standalone SigLIP processor to
+    # avoid 5-D multi-crop tensors. Gemma4 uses its own image processor because
+    # Gemma4VisionModel expects patchified (B, num_patches, patch_pixels) input
+    # along with pixel_position_ids — not the (B, C, H, W) format SigLIP returns.
     _DEFAULT_PROCESSOR: dict[str, str] = {
         "llava": "google/siglip-so400m-patch14-384",
-        "gemma4": "google/siglip2-so400m-patch14-384",
+        "gemma4": "google/gemma-4-E2B-it",
     }
 
     def __init__(
@@ -208,10 +209,22 @@ class GMMLPImageEncoder(nn.Module):
         vision_chunk_size: int,
         temperature: float,
         image_processor_id: str | None = None,
+        align_dim: int | None = None,
     ) -> None:
         super().__init__()
-        self.vision_chunk_size = vision_chunk_size
+        # Gemma4VisionModel's _position_embeddings creates a (B, max_patches, 2,
+        # position_embedding_size=10240) one-hot tensor — ~100 MB per image at
+        # bfloat16. Cap chunk to 1 and limit max_soft_tokens so the tensor fits
+        # in VRAM alongside the language model weights.
+        self.vision_chunk_size = 1 if model_family == "gemma4" else vision_chunk_size
+        # 70 soft tokens × pooling_kernel_size²=9 → 630 patches → ~400×400 equivalent;
+        # ~24 MB one-hot vs ~788 MB at default 280. Must be in (70, 140, 280, 560, 1120).
+        self.gemma4_max_soft_tokens = 70 if model_family == "gemma4" else None
+        # Gradient checkpoint per-layer stores ~23 MB per frame. 500 frames × 23 MB
+        # = 11.5 GB just for saved layer inputs. Cap to keep memory reasonable.
+        self.max_frames_with_grad = 128
         self.temperature = temperature
+        self.model_family = model_family
 
         lora_cfg = LoraConfig(
             r=lora_r,
@@ -244,11 +257,23 @@ class GMMLPImageEncoder(nn.Module):
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
             )
+
+            # Gemma4 wraps attention projections in Gemma4ClippableLinear, which
+            # PEFT does not recognise. Replace each wrapper with its inner Linear
+            # so LoRA can inject adapters normally.
+            def _unwrap_clippable(m: torch.nn.Module) -> None:
+                for name, child in list(m.named_children()):
+                    if type(child).__name__ == "Gemma4ClippableLinear":
+                        setattr(m, name, child.linear)
+                    else:
+                        _unwrap_clippable(child)
+
+            _unwrap_clippable(base.model.vision_tower)
             # Vision tower is nested one level deeper in Gemma4.
             base.model.vision_tower = get_peft_model(base.model.vision_tower, lora_cfg)
             base.model.vision_tower.gradient_checkpointing_enable()
             self.vision_tower = base.model.vision_tower
-            self.projector = base.model.multi_modal_projector  # Gemma MLP: D_vit → D_llm
+            self.projector = base.model.embed_vision  # Gemma4MultimodalEmbedder: D_vit → D_llm
             vit_hidden = base.config.vision_config.hidden_size
             del base
 
@@ -258,12 +283,14 @@ class GMMLPImageEncoder(nn.Module):
 
         gc.collect()
 
-        # Use the plain ViT image processor — the full LLaVA / Gemma4 processor
-        # applies multi-crop preprocessing that outputs 5-D (B, N, C, H, W) tensors
-        # and uses N× the GPU memory. The standalone SigLIP / SigLIP2 processor
-        # returns plain (B, C, H, W) — exactly one crop per input image.
         proc_id = image_processor_id or self._DEFAULT_PROCESSOR[model_family]
         self._image_processor = AutoImageProcessor.from_pretrained(proc_id)
+        # Mirror gemma4.py: disable pan-and-scan / multi-crop so pixel_values
+        # stays 4-D (B, C, H, W) and doesn't produce 5-D tiled tensors.
+        ip = getattr(self._image_processor, "image_processor", self._image_processor)
+        for attr in ("do_image_splitting", "do_pan_and_scan"):
+            if hasattr(ip, attr):
+                setattr(ip, attr, False)
 
         self.perceiver = PerceiverResampler(
             dim=vit_hidden,
@@ -273,6 +300,14 @@ class GMMLPImageEncoder(nn.Module):
             num_latents=num_latents,
             num_media_embeds=num_media_embeds,
         )
+
+        # Optional projection to align Perceiver output dim with text embedding dim.
+        # Needed when vision hidden size (e.g. 768 for Gemma4) differs from the
+        # pre-extracted SigLIP text feature dim (1152 for SigLIP2-so400m).
+        if align_dim is not None and align_dim != vit_hidden:
+            self.align_proj: nn.Linear | None = nn.Linear(vit_hidden, align_dim)
+        else:
+            self.align_proj = None
 
     def _encode_video(
         self,
@@ -287,14 +322,31 @@ class GMMLPImageEncoder(nn.Module):
         """
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
+
+        # During a grad-enabled forward (backward pass), cap frame count so that
+        # gradient-checkpoint storage (≈23 MB/frame) doesn't exhaust VRAM.
+        if torch.is_grad_enabled() and len(pil_frames) > self.max_frames_with_grad:
+            step = len(pil_frames) / self.max_frames_with_grad
+            pil_frames = [pil_frames[int(i * step)] for i in range(self.max_frames_with_grad)]
+
         vis_list, proj_list = [], []
         for i in range(0, len(pil_frames), self.vision_chunk_size):
             chunk = pil_frames[i : i + self.vision_chunk_size]
-            # SiglipImageProcessor returns (B, C, 384, 384) — exactly one crop
-            # per image, no 5D reshape needed.
-            inputs = self._image_processor(images=chunk, return_tensors="pt").to(device)
-            pv = inputs["pixel_values"].to(dtype)  # (c, C, H, W)
-            vis = self.vision_tower(pv).last_hidden_state  # (c, P, D_vit)
+            proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
+            if self.gemma4_max_soft_tokens is not None:
+                proc_kwargs["max_soft_tokens"] = self.gemma4_max_soft_tokens
+            inputs = self._image_processor(**proc_kwargs).to(device)
+            pv = inputs["pixel_values"].to(dtype)
+            pos_ids = inputs.get(
+                "image_position_ids",
+            )  # (c, num_patches, 2) for Gemma4; None for SigLIP
+            vis = self.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
+            # Gemma4VisionModel strips padding and flattens the batch dimension,
+            # returning (total_valid_patches, D). Reshape back to (c, p, D).
+            if vis.dim() == 2:
+                c = len(chunk)
+                p = vis.shape[0] // c
+                vis = vis.view(c, p, vis.shape[-1])
             proj = self.projector(vis)  # (c, P, D_llm)
             vis_list.append(vis)
             proj_list.append(proj.mean(dim=1))  # (c, D_llm)
@@ -325,7 +377,10 @@ class GMMLPImageEncoder(nn.Module):
         for vis_patches in all_vis_patches:
             out = self.perceiver(vis_patches.unsqueeze(0))  # (1, T_i, K, D_vit)
             sentence_embs.append(out.mean(dim=(1, 2)))  # (1, D_vit)
-        sentence_emb = F.normalize(torch.cat(sentence_embs, dim=0), dim=-1)  # (B, D_vit)
+        sentence_emb = torch.cat(sentence_embs, dim=0)  # (B, D_vit)
+        if self.align_proj is not None:
+            sentence_emb = self.align_proj(sentence_emb)  # (B, align_dim)
+        sentence_emb = F.normalize(sentence_emb, dim=-1)
 
         return sentence_emb, student_vid
 
@@ -341,7 +396,7 @@ class GMMLPTextEncoder(nn.Module):
 
 
 class GMMLP(nn.Module):
-    def __init__(self, args, config) -> None:
+    def __init__(self, args, config, align_dim: int | None = None) -> None:
         super().__init__()
         self.model_image = GMMLPImageEncoder(
             model_id=args.model_id,
@@ -354,6 +409,7 @@ class GMMLP(nn.Module):
             vision_chunk_size=args.vision_chunk_size,
             temperature=args.temperature,
             image_processor_id=args.image_processor_id or None,
+            align_dim=align_dim,
         )
         self.model_text = GMMLPTextEncoder()
         self.lambda_ground = args.lambda_ground
@@ -569,7 +625,11 @@ def train_one_epoch(
     loss_value = 0.0
 
     for step, (src_input, tgt_input) in enumerate(
-        metric_logger.log_every(data_loader, print_freq, header),
+        tqdm(
+            metric_logger.log_every(data_loader, print_freq, header),
+            total=len(data_loader),
+            disable=not utils.is_main_process(),
+        ),
     ):
         if args.debug_mode and step >= 2:
             print("DEBUG MODE: stopping after 2 batches.")
@@ -580,9 +640,11 @@ def train_one_epoch(
         optimizer.zero_grad()
 
         loss_value = align_val + ground_val * args.lambda_ground
-        if not math.isfinite(loss_value):
-            print(f"Loss is {loss_value}, stopping training.")
-            sys.exit(1)
+
+        # Use for debugging because it's slow
+        # if not math.isfinite(loss_value):
+        #     print(f"Loss is {loss_value}, stopping training.")
+        #     sys.exit(1)
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(align_loss=align_val)
@@ -673,7 +735,7 @@ def main(args, config) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
-    cudnn.benchmark = False
+    cudnn.benchmark = True
 
     print("Loading grounding features …")
     grounding_all = load_descript_features(
@@ -747,7 +809,8 @@ def main(args, config) -> None:
 
     # --- Model ---
     print("Creating GMMLP model …")
-    model = GMMLP(args=args, config=config).to(device)
+    siglip_dim = next(iter(siglip_by_split["train"].values())).shape[-1]
+    model = GMMLP(args=args, config=config, align_dim=siglip_dim).to(device)
 
     if args.finetune:
         ckpt = torch.load(args.finetune, map_location="cpu")
@@ -788,7 +851,11 @@ def main(args, config) -> None:
     start_time = time.time()
     min_loss = np.inf
 
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in tqdm(
+        range(args.start_epoch, args.epochs),
+        total=args.epochs - args.start_epoch,
+        disable=not utils.is_main_process(),
+    ):
         log_memory(args, f"epoch_{epoch}_start")
 
         train_loader = make_train_loader()
