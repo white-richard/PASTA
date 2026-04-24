@@ -1,10 +1,10 @@
-# MMSLT
+# ASL VLM Project
 
 ## Setup
 
 **Prerequisites:** `uv` ([install](https://docs.astral.sh/uv/getting-started/installation/)) and `git`.
 
-### 1. Download Phoenix dataset
+### Download Phoenix dataset
 
 Run this in a `tmux` session — it takes a few hours:
 
@@ -17,7 +17,9 @@ rm phoenix-2014-T.v3.tar.gz
 cd ..
 ```
 
-You'll need to download the video description labels from [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link). Move them into this dir: `datasets/phoenix-descript`
+You'll need to download the video description labels from [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link).
+
+Structure the descriptions like:
 
 ```txt
 datasets/phoenix-descript
@@ -26,9 +28,9 @@ datasets/phoenix-descript
 └── phoenix_SLdescriptions.train
 ```
 
-CSL requires a formal request; use Phoenix for reproducibility verification.
+### Patch `nlg-eval`
 
-### 2. Patch `nlg-eval`
+TODO: is this necessary now that we are using python 3.12?
 
 `gensim 3.8.3` cannot be compiled on Python 3.10 due to a removed NumPy build flag.
 Clone the dependency locally and relax its gensim version pin before installing:
@@ -43,7 +45,9 @@ git commit -am 'Relax gensim requirement to >=4.0.1 for Python 3.10 compatibilit
 cd ../..
 ```
 
-### 3. Install dependencies
+### Install dependencies
+
+TODO: resolve setup.fish into pyproject.toml
 
 ```bash
 git submodule update --init --recursive
@@ -51,55 +55,26 @@ uv sync
 uv pip install -e repos/gradcache
 ```
 
-The `requirements.txt` references `nlg-eval-temp` via a relative path.
-All other packages install from PyPI or the PyTorch index without compilation.
+# Method
 
-## Installation
+## Generate Description Embeddings
 
-## Code Descriptions
-
-### 1. **Generate BERT Description Embeddings**
-
-Before training, you must convert the raw LLaVA-generated text descriptions into BERT embeddings. The `descript_embed.ipynb` notebook does the following:
-
-1. Loads `phoenix_SLdescriptions.{train,dev,test}` from `datasets/phoenix-descript/` — each file is a dict of `{video_name: [list of text descriptions]}`
-2. Runs each video's descriptions through `bert-base-cased`, taking the CLS token embedding as a 768-dim feature vector per description
-3. Overwrites the same files with the enriched format: `{video_name: {'texts': [...], 'bert_feat': tensor}}`
+Before training, you must convert the raw VLM-generated text descriptions into embeddings:
 
 ```bash
-python src/descript_embed.py
+bash scripts/generate_descript.bash
 ```
 
----
+TODO: finish method
 
-### 2. Reproduce author's results
+# Appendix
 
-Reproduce the authors results using the following bash script:
+## Reproduce MMSLT author's results
+
 This trains the MMLP then MMSLT using the paper's hyperparameters
 
-```bash
-chmod +x scripts/reproduce_author.bash
-./scripts/reproduce_author.bash
-```
-
-## Generate Descriptions with vLLM and TurboQuant
-
-Install dependencies in a new venv:
+Text sign descriptions and weight files from MMSLT can be found in [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
 
 ```bash
-uv venv --python 3.12 desc-venv
-bash scripts/setup_descript_env.bash
-source desc-venv/bin/activate
+bash scripts/author/reproduce_author.bash
 ```
-
-Run the code:
-
-```bash 
-scripts/generate_descript_author.bash
-```
-
-this runs over each split (train, dev, test).
-
-## Notes
-
-- Text sign descriptions and weight files from MMSLT can be found in [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link)
