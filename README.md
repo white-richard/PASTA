@@ -47,8 +47,6 @@ cd ../..
 
 ### Install dependencies
 
-TODO: resolve setup.fish into pyproject.toml
-
 ```bash
 git submodule update --init --recursive
 uv sync
