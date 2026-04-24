@@ -22,7 +22,7 @@ You'll need to download the video description labels from [GoogleDrive](https://
 Structure the descriptions like:
 
 ```txt
-datasets/phoenix-descript
+datasets/text_phoenix-descript
 ├── phoenix_SLdescriptions.dev
 ├── phoenix_SLdescriptions.test
 └── phoenix_SLdescriptions.train

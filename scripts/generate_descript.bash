@@ -9,9 +9,6 @@ for arg in "$@"; do
     fi
 done
 
-# _nvidia_libs=$(find "$(dirname "$0")/../.venv/lib" -type d -name "lib" -path "*/nvidia/*" 2>/dev/null | tr '\n' ':')
-# export LD_LIBRARY_PATH="${_nvidia_libs%:}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
 # Hide annoying prints
 export VLLM_LOGGING_LEVEL=ERROR
 export TRANSFORMERS_VERBOSITY=error

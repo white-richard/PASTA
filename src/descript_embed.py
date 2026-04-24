@@ -1,17 +1,12 @@
-#!/usr/bin/env python
-
 import argparse
 import os
-from collections import defaultdict
-
-os.environ["USE_TF"] = "0"
-
 import pathlib
+from collections import defaultdict
 
 import torch
 from tqdm import tqdm
 
-torch.cuda.is_available()
+os.environ["USE_TF"] = "0"
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -22,16 +17,17 @@ parser.add_argument(
         "Text encoder to use: "
         "'bert' (bert-base-cased), "
         "'siglip' (google/siglip-so400m-patch14-384), "
-        "'siglip2' (google/siglip2-so400m-patch14-384 — matches Gemma4's image space)."
+        "'siglip2' (google/siglip2-so400m-patch14-384)."
     ),
 )
 args = parser.parse_args()
 
-path = pathlib.Path("datasets/text_phoenix-descript")
+path = pathlib.Path("datasets/phoenix-descript")
 
 train = torch.load(path / "phoenix_SLdescriptions.train", weights_only=False)
 dev = torch.load(path / "phoenix_SLdescriptions.dev", weights_only=False)
 test = torch.load(path / "phoenix_SLdescriptions.test", weights_only=False)
+raise "Need to update these to the correct path. TODO later"
 
 print(len(train))
 print(len(dev))
@@ -52,7 +48,6 @@ if args.encoder == "siglip":
             texts,
             return_tensors="pt",
             padding="max_length",
-            max_length=64,
             truncation=True,
         )
         with torch.no_grad():
@@ -72,7 +67,6 @@ elif args.encoder == "siglip2":
             texts,
             return_tensors="pt",
             padding="max_length",
-            max_length=64,
             truncation=True,
         )
         with torch.no_grad():

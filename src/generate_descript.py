@@ -199,7 +199,7 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=2000)
     parser.add_argument("--video_bs", type=int, default=1)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--save_path", type=str, default="out/descript/features/")
+    parser.add_argument("--save_path", type=str, default="out/text_descript")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
         "--extract-hidden-states",
