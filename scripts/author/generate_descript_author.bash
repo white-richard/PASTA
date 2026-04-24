@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 export VLLM_LOGGING_LEVEL=ERROR
 export VLLM_LOGGING_CONFIG_PATH="$(dirname "$0")/logging_descript.json"
 export TRANSFORMERS_VERBOSITY=error
