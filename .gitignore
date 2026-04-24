@@ -11,7 +11,7 @@ log/
 *.zip
 uv.lock
 .claude
-datasets/
+datasets
 .zed
 out/
 pretrain_models/
