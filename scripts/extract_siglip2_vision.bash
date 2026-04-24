@@ -4,16 +4,14 @@ set -euo pipefail
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$(dirname "$0")/slib/monitor_cmd.bash"
 
-# _nvidia_lib_dirs=$(find "${VENV_DIR}/lib/python3.12/site-packages/nvidia" -maxdepth 2 -name "lib" -type d 2>/dev/null | tr '\n' ':')
-# export LD_LIBRARY_PATH="${_nvidia_lib_dirs}${LD_LIBRARY_PATH:-}"
-
-# --- Config ---
+# === Config ===
 HF_MODEL_ID="google/gemma-4-26B-A4B-it"
 IMG_PATH="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/"
 SAVE_PATH="datasets/phoenix-descript/gmmlp_features"
 BATCH_SIZE=64
 NUM_WORKERS=8
 SPLITS=(train dev test)
+# ==============
 
 # Determine GPUs / shard count
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
