@@ -32,12 +32,20 @@ class LLaVA(nn.Module):
         self.processor.image_processor.do_image_splitting = do_image_splitting
 
         if extract_hidden_states:
+            from transformers import BitsAndBytesConfig
+
+            quant_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
             self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
                 model_id,
-                torch_dtype=torch.bfloat16,
+                quantization_config=quant_config,
+                device_map="auto",
                 low_cpu_mem_usage=True,
-            ).cuda()
-            self.model = torch.compile(self.model)
+            )
             self.model.eval()
         else:
             self.model = LLM(
@@ -74,25 +82,28 @@ class LLaVA(nn.Module):
 
     @torch.no_grad()
     def _forward_hidden_states(self, images: list) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        device = next(self.model.parameters()).device
-
         inputs = self.processor(
             text=[self._build_prompt()] * len(images),
             images=images,
             return_tensors="pt",
             padding=True,
-        ).to(device)
+        ).to("cuda")
 
         mid_container: list[torch.Tensor] = []
         last_container: list[torch.Tensor] = []
 
         def _make_hook(container):
             def _hook(module, input, output) -> None:
-                container.append(output)
+                hs = output[0] if isinstance(output, tuple) else output
+                container.append(hs)
 
             return _hook
 
-        layers = self.model.language_model.layers
+        # LlavaOnevisionForConditionalGeneration
+        #   .model          → LlavaOnevisionModel
+        #   .language_model → Qwen2Model
+        #   .layers[N]      → Qwen2DecoderLayer
+        layers = self.model.model.language_model.layers
         hook_mid = layers[self.hidden_state_layer].register_forward_hook(_make_hook(mid_container))
         hook_last = layers[-1].register_forward_hook(_make_hook(last_container))
 

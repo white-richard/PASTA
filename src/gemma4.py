@@ -12,15 +12,11 @@ if TYPE_CHECKING:
 
 
 class Gemma4(nn.Module):
-    """Gemma 4 multimodal wrapper — same interface as LLaVA in llavaov.py.
+    """Gemma 4 multimodal wrapper.
 
-    forward(images) → list[str]            text-generation mode
-    forward(images) → list[torch.Tensor]   hidden-state extraction mode
-
-    Architecture note (hidden-state mode):
-      LLM decoder layers live at model.model.language_model.model.layers.
-      Visual token count is detected dynamically from input_ids so the code
-      works regardless of whether pan-and-scan is enabled.
+    forward(images) → list[str]   text-generation mode
+    forward(images) → list[dict]  hidden-state extraction mode
+        Each dict: {"layers": {layer_idx: tensor (D,), ...}, "text": str (if save_text)}
     """
 
     def __init__(
@@ -31,7 +27,8 @@ class Gemma4(nn.Module):
         max_tokens: int = 80,
         use_turboquant: bool = False,
         extract_hidden_states: bool = False,
-        hidden_state_layer: int = 20,
+        hidden_state_layers: list[int] | int = 20,
+        save_text: bool = False,
         do_image_splitting: bool = False,
     ) -> None:
         super().__init__()
@@ -39,7 +36,12 @@ class Gemma4(nn.Module):
         self.model_id = model_id
         self.max_tokens = max_tokens
         self.extract_hidden_states = extract_hidden_states
-        self.hidden_state_layer = hidden_state_layer
+        self.hidden_state_layers = (
+            [hidden_state_layers]
+            if isinstance(hidden_state_layers, int)
+            else list(hidden_state_layers)
+        )
+        self.save_text = save_text
 
         # Processor must come from a standard HF repo (GGUF repos lack
         # preprocessor_config.json).  For hidden-state mode we use hf_model_id;
@@ -47,12 +49,14 @@ class Gemma4(nn.Module):
         canonical_id = "google/gemma-4-26B-A4B-it"
         processor_id = hf_model_id if extract_hidden_states else canonical_id
         self.processor = AutoProcessor.from_pretrained(processor_id)
-        # Disable pan-and-scan / multi-crop so pixel_values stays 4-D (B, C, H, W).
+
+        # Disable pan-and-scan so multi-crop so pixel_values stays 4-D (B, C, H, W).
         if hasattr(self.processor, "image_processor"):
             ip = self.processor.image_processor
             for attr in ("do_image_splitting", "do_pan_and_scan"):
                 if hasattr(ip, attr):
                     setattr(ip, attr, do_image_splitting)
+
         if extract_hidden_states:
             from accelerate import infer_auto_device_map, init_empty_weights
             from transformers import AutoConfig, BitsAndBytesConfig, Gemma4ForConditionalGeneration
@@ -74,7 +78,9 @@ class Gemma4(nn.Module):
             config = AutoConfig.from_pretrained(hf_model_id)
             with init_empty_weights():
                 empty = Gemma4ForConditionalGeneration(config)
+                
             total_vram = torch.cuda.get_device_properties(0).total_memory
+            
             device_map = infer_auto_device_map(
                 empty,
                 max_memory={0: total_vram * 4, "cpu": 200 * 1024**3},
@@ -125,7 +131,7 @@ class Gemma4(nn.Module):
         )
 
     @torch.no_grad()
-    def _forward_hidden_states(self, images: list) -> list[torch.Tensor]:
+    def _forward_hidden_states(self, images: list) -> list[dict]:
         device = next(self.model.parameters()).device
 
         # Gemma4's processor requires images as a list-of-lists: one inner list
@@ -138,37 +144,46 @@ class Gemma4(nn.Module):
             padding=True,
         ).to(device)
 
-        # Hook-based extraction: only two layers' tensors are ever live in VRAM,
-        # unlike output_hidden_states=True which materialises all N+1 layers.
-        # Since torch.compile is not used here, hooks have no graph-break cost.
-        mid_container: list[torch.Tensor] = []
-        last_container: list[torch.Tensor] = []
+        # Hook-based extraction
+        layers = self.model.model.language_model.layers
+        n_layers = len(layers)
+        # Resolve negative indices once so containers are keyed consistently.
+        resolved_layers = [idx % n_layers for idx in self.hidden_state_layers]
+        containers: dict[int, list[torch.Tensor]] = {idx: [] for idx in resolved_layers}
 
         def _make_hook(container):
             def _hook(module, input, output) -> None:
-                # output may be a tuple (hidden, ...) depending on layer type.
+                # Skip decode steps
+                if container:
+                    return
                 hs = output[0] if isinstance(output, tuple) else output
-                container.append(hs)
+                container.append(hs.detach())
 
             return _hook
 
-        # Gemma4ForConditionalGeneration
-        #   .model          → Gemma4Model
-        #   .language_model → Gemma4TextModel
-        #   .layers[N]      → Gemma4TextDecoderLayer
-        layers = self.model.model.language_model.layers
-        hook_mid = layers[self.hidden_state_layer].register_forward_hook(_make_hook(mid_container))
-        hook_last = layers[-1].register_forward_hook(_make_hook(last_container))
+        hooks = [
+            layers[idx].register_forward_hook(_make_hook(containers[idx]))
+            for idx in resolved_layers
+        ]
+        texts: list[str] | None = None
         try:
-            self.model(**inputs, use_cache=False)
+            if self.save_text:
+                # run prefill where hooks fire then generation
+                output_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_tokens,
+                    do_sample=False,
+                )
+                texts = self.processor.batch_decode(
+                    output_ids[:, inputs["input_ids"].shape[1] :],
+                    skip_special_tokens=True,
+                )
+            else:
+                self.model(**inputs, use_cache=False)
         finally:
-            hook_mid.remove()
-            hook_last.remove()
+            for h in hooks:
+                h.remove()
 
-        mid_hs = mid_container[0]  # (B, seq_len, D)
-        last_hs = last_container[0]  # (B, seq_len, D)
-
-        # image_token_index is the standard name; fall back to image_token_id if needed.
         image_token_id = getattr(
             self.model.config,
             "image_token_index",
@@ -177,14 +192,20 @@ class Gemma4(nn.Module):
 
         results = []
         for b in range(len(images)):
-            # Locate the visual token span dynamically — Gemma4's token count
-            # depends on resolution and whether pan-and-scan is enabled.
+            # Locate the visual token span
             positions = (inputs["input_ids"][b] == image_token_id).nonzero(as_tuple=True)[0]
             n_visual = len(positions)
             img_start = positions[0].item()
-            mid_visual = mid_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()  # (D,)
-            last_visual = last_hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()  # (D,)
-            results.append((mid_visual, last_visual))
+
+            layer_tensors: dict[int, torch.Tensor] = {}
+            for idx in resolved_layers:
+                hs = containers[idx][0]  # (B, seq_len, D)
+                layer_tensors[idx] = hs[b, img_start : img_start + n_visual, :].mean(dim=0).cpu()
+
+            result: dict = {"layers": layer_tensors}
+            if texts is not None:
+                result["text"] = texts[b]
+            results.append(result)
 
         return results
 
