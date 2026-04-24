@@ -10,16 +10,16 @@ def split_src_input(model_input, chunk_size):
     """Split src_input along sample boundaries using src_length_batch."""
     lengths = model_input["src_length_batch"]
     batch_size = len(lengths)
+    # Bug 1 fix: compute cumsum once (O(B)) instead of re-summing each iteration (O(B²))
+    cumsum = lengths.cumsum(0)
     chunks = []
 
     for start in range(0, batch_size, chunk_size):
         end = min(start + chunk_size, batch_size)
         chunk_lengths = lengths[start:end]
 
-        # input_img and input_descript are flat [total_frames, ...] —
-        # need to slice the correct frame ranges for this sample chunk
-        frame_start = sum(lengths[:start])
-        frame_end = sum(lengths[:end])
+        frame_start = int(cumsum[start - 1]) if start > 0 else 0
+        frame_end = int(cumsum[end - 1])
 
         chunk = {}
         for k, v in model_input.items():
@@ -70,14 +70,35 @@ def split_input_fn(model_input, chunk_size):
     return split_tgt_input(model_input, chunk_size)
 
 
-class DictInputWrapper(nn.Module):
+def contrastive_loss_fn(sign_reps, text_reps, temperature=0.07):
+    """sign_reps, text_reps: [N, C] normalized embeddings for the FULL batch.
+    GradCache assembles these from chunks before calling this.
+    """
+    sim = sign_reps @ text_reps.T / temperature  # [N, N]
+    targets = torch.arange(sim.size(0), device=sim.device)
+    loss_s2t = F.cross_entropy(sim, targets)
+    loss_t2s = F.cross_entropy(sim.T, targets)
+    return (loss_s2t + loss_t2s) / 2.0
+
+
+# Bug 8 fix: shared base for the dummy-param anchor pattern
+class _AnchoredEncoder(nn.Module):
+    """Base class that anchors frozen encoder outputs to the autograd graph.
+
+    A dummy param anchors the output to the autograd graph without affecting
+    values or gradients, so GradCache's surrogate backward works even when the
+    encoder has no non-frozen params with requires_grad.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dummy = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+
+class DictInputWrapper(_AnchoredEncoder):
     def __init__(self, model) -> None:
         super().__init__()
         self.model = model
-        # Frozen encoders produce outputs with no grad_fn, which breaks
-        # GradCache's surrogate backward. A dummy param anchors the output
-        # to the autograd graph without affecting values or gradients.
-        self.dummy = nn.Parameter(torch.zeros(1), requires_grad=True)
         # Accumulates auxiliary losses (e.g. descript mse_loss) from
         # GradCache's forward_backward pass so they can be backpropagated
         # separately without rerunning the full batch.
@@ -122,70 +143,50 @@ class GradCacheWithAux(GradCache):
         else:
             sync_contexts = [nullcontext for _ in range(len(model_inputs))]
 
-        for x, state, gradient, sync_context in zip(
-            model_inputs,
-            random_states,
-            cached_gradients,
-            sync_contexts,
-            strict=False,
-        ):
-            with sync_context():
-                with state:
-                    y = self.model_call(model, x)
-                reps = self.get_reps(y)
+        # Bug 4 fix: weight aux loss by fraction of actual samples, not by 1/num_chunks,
+        # so the last (possibly smaller) chunk is weighted correctly.
+        def _chunk_n(x):
+            if "src_length_batch" in x:
+                return len(x["src_length_batch"])
+            return len(next(v for v in x.values() if isinstance(v, (torch.Tensor, list))))
 
-                surrogate = torch.dot(reps.flatten(), gradient.flatten())
-                if has_aux and model.aux_losses:
-                    # retain graph so aux loss can still backward through
-                    # shared intermediates (e.g. backbone features)
-                    surrogate.backward(retain_graph=True)
-                    aux = model.aux_losses[-1]
-                    (self.aux_weight * aux / len(model_inputs)).backward()
-                else:
-                    surrogate.backward()
+        total_n = sum(_chunk_n(x) for x in model_inputs) if has_aux else 1
 
-        if has_aux and model.aux_losses:
-            self.last_aux_loss = sum(l.detach() for l in model.aux_losses) / len(model.aux_losses)
+        # Bug 5 fix: ensure aux_losses is cleared even if the loop raises.
+        try:
+            for x, state, gradient, sync_context in zip(
+                model_inputs,
+                random_states,
+                cached_gradients,
+                sync_contexts,
+                strict=False,
+            ):
+                with sync_context():
+                    with state:
+                        y = self.model_call(model, x)
+                    reps = self.get_reps(y)
 
-
-def split_dict_input(model_input, chunk_size):
-    """Split a dict of tensors/lists into chunks along the batch dimension."""
-    # Find the batch size from the first tensor-like value
-    keys = list(model_input.keys())
-    batch_size = len(model_input[keys[0]])
-
-    chunks = []
-    for start in range(0, batch_size, chunk_size):
-        end = min(start + chunk_size, batch_size)
-        chunk = {}
-        for k, v in model_input.items():
-            if isinstance(v, (torch.Tensor, list)):
-                chunk[k] = v[start:end]
-            else:
-                chunk[k] = v  # scalars/configs — pass through unchanged
-        chunks.append(chunk)
-    return chunks
+                    surrogate = torch.dot(reps.flatten(), gradient.flatten())
+                    if has_aux and model.aux_losses:
+                        # retain graph so aux loss can still backward through
+                        # shared intermediates (e.g. backbone features)
+                        surrogate.backward(retain_graph=True)
+                        aux = model.aux_losses[-1]
+                        chunk_n = _chunk_n(x)
+                        (self.aux_weight * aux * (chunk_n / total_n)).backward()
+                    else:
+                        surrogate.backward()
+        finally:
+            if has_aux:
+                # Store averaged aux loss before clearing, so __call__ can read it.
+                if model.aux_losses:
+                    self.last_aux_loss = sum(
+                        l.detach() for l in model.aux_losses
+                    ) / len(model.aux_losses)
+                model.aux_losses.clear()
 
 
-def contrastive_loss_fn(sign_reps, text_reps, tau=0.07):
-    """sign_reps, text_reps: [N, C] normalized embeddings for the FULL batch.
-    GradCache assembles these from chunks before calling this.
-    """
-    sim = sign_reps @ text_reps.T / tau  # [N, N]
-    targets = torch.arange(sim.size(0), device=sim.device)
-    loss_s2t = F.cross_entropy(sim, targets)
-    loss_t2s = F.cross_entropy(sim.T, targets)
-    return (loss_s2t + loss_t2s) / 2.0
-
-
-def _symmetric_info_nce(a: Tensor, b: Tensor, temperature: float = 0.07) -> Tensor:
-    """Symmetric InfoNCE between (N, D) L2-normalised tensors."""
-    logits = a @ b.T / temperature
-    labels = torch.arange(len(a), device=a.device)
-    return (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
-
-
-class _AlignOnlyWrapper(nn.Module):
+class _AlignOnlyWrapper(_AnchoredEncoder):
     """Thin wrapper around GMMLPImageEncoder for alignment-only GradCache.
 
     Returns sentence_emb only (drops student_vid). Used for the InfoNCE
@@ -199,9 +200,6 @@ class _AlignOnlyWrapper(nn.Module):
     def __init__(self, img_encoder: nn.Module) -> None:
         super().__init__()
         self.model = img_encoder
-        # Dummy param anchors the output to the autograd graph even when the
-        # LoRA-adapted ViT has no non-frozen params with requires_grad.
-        self.dummy = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def forward(self, **kwargs) -> Tensor:
         out = self.model(kwargs)  # (sentence_emb, student_vid)
@@ -225,13 +223,10 @@ class _GroundingAuxWrapper(DictInputWrapper):
     mathematically equivalent to computing it on the full batch.
     """
 
-    def __init__(
-        self,
-        img_encoder: nn.Module,
-        temperature: float,  # kept for API symmetry; unused for MSE
-    ) -> None:
+    # Bug 3 fix: removed `temperature` parameter — it was unused for MSE and
+    # created a footgun if the class were reused for an InfoNCE path.
+    def __init__(self, img_encoder: nn.Module) -> None:
         super().__init__(img_encoder)
-        self.temperature = temperature
 
     def forward(self, **kwargs) -> Tensor:
         out = self.model(kwargs)  # (sentence_emb, student_vid)
@@ -262,14 +257,18 @@ class GradCacheWithGrounding:
                     GradCache second pass (_GroundingAuxWrapper).  MSE is
                     separable across samples so per-chunk averaging is exact.
         'infonce' — Full-batch InfoNCE.  After the alignment GradCache pass,
-                    a separate chunked forward collects all student_vids, then
-                    InfoNCE is computed on the full batch and backpropagated.
-                    This ensures all negative pairs are in scope, matching the
-                    intent described in the argument help text.
+                    a two-pass GradCache-style loop collects cached reps
+                    no-grad, computes the gradient w.r.t. those reps, then
+                    replays each chunk with grad and backprops immediately.
+                    This ensures all negative pairs are in scope without
+                    holding all activations in memory simultaneously.
 
     __call__(src_input, tgt_input) → (align_val: float, ground_val: float)
         Both values are unscaled (lambda_ground not applied); the caller is
         responsible for scaling ground_val when computing a display loss.
+        Note: for InfoNCE grounding the backpropagated gradient IS scaled by
+        lambda_ground internally (via the surrogate), even though the returned
+        float is unscaled.
     """
 
     def __init__(
@@ -297,19 +296,20 @@ class GradCacheWithGrounding:
         txt_wrapper = DictInputWrapper(txt_encoder)
 
         def _split_fn(inp, cs):
-            if "images" in inp:
+            if "images" in inp or "vis_feats" in inp:
                 return split_src_fn(inp, cs)
             return split_tgt_fn(inp, cs)
 
         def _align_fn(a, b):
             return align_loss_fn(a, b, temperature)
 
-        if ground_loss_type == "mse":
+        if ground_loss_type == "mse" and lambda_ground > 0.0:
             # MSE is separable — compute per-chunk as an aux loss.
-            self._img_wrapper: nn.Module = _GroundingAuxWrapper(img_encoder, temperature)
+            # Bug 3 fix: no longer passing temperature (unused for MSE).
+            self._img_wrapper: nn.Module = _GroundingAuxWrapper(img_encoder)
             aux_weight = lambda_ground
         else:
-            # InfoNCE grounding needs full-batch negatives; handled separately.
+            # InfoNCE grounding needs full-batch negatives, or grounding is disabled.
             self._img_wrapper = _AlignOnlyWrapper(img_encoder)
             aux_weight = 0.0
 
@@ -335,33 +335,62 @@ class GradCacheWithGrounding:
 
         if self.ground_loss_type == "mse":
             # MSE already backpropagated inside GradCache; just read the value.
-            ground_val = float(self._gc.last_aux_loss)
+            # Bug 6 fix: guard against 0.0 sentinel on first step.
+            ground_val = float(self._gc.last_aux_loss) if self._gc.last_aux_loss else 0.0
         else:
-            # InfoNCE grounding: separate full-batch pass (gradient accumulation).
+            # InfoNCE grounding: separate two-pass GradCache-style step.
             ground_val = self._run_infonce_grounding(src_input)
 
         return align_val, ground_val
 
     def _run_infonce_grounding(self, src_input: dict) -> float:
-        """Collect all student_vids, compute full-batch InfoNCE, backpropagate.
+        """Two-pass GradCache for InfoNCE grounding loss.
 
-        Called only when ground_loss_type == 'infonce'. Gradients from this
-        pass accumulate on top of those already placed by the alignment GradCache
-        step; optimizer.step() applies both together.
+        Bug 2 fix: replaces the single-pass approach that held all activations
+        simultaneously. Now mirrors GradCache's pattern:
+          Pass 1 (no_grad): collect cached normalised student_vid reps.
+          Compute InfoNCE gradient w.r.t. those cached reps.
+          Pass 2 (with_grad): replay each chunk; backprop via surrogate
+            dot(reps_chunk, grad_chunk) scaled by lambda_ground, then free
+            each chunk's graph immediately.
+
+        Returns the unscaled grounding loss float (lambda_ground is applied
+        to the surrogate during backprop, not to the returned value).
         """
         chunks = self.split_src_fn(src_input, self.img_chunk_size)
+        device = self.device
 
-        all_student_vids: list[Tensor] = []
+        # Pass 1: no-grad — collect cached normalised reps
+        with torch.no_grad():
+            cached_reps: list[Tensor] = []
+            for chunk in chunks:
+                _, student_vid = self.img_encoder(chunk)
+                cached_reps.append(F.normalize(student_vid.float(), dim=-1))
+
+        reps_full = torch.cat(cached_reps, dim=0)  # (B, D)
+        dtype = reps_full.dtype
+        teacher = F.normalize(
+            src_input["grounding_feats"].to(device, dtype=dtype), dim=-1  # type: ignore[index]
+        )
+
+        # Compute InfoNCE loss and gradient w.r.t. cached reps only
+        reps_for_grad = reps_full.detach().requires_grad_(True)
+        ground_loss = contrastive_loss_fn(reps_for_grad, teacher, self.temperature)
+        ground_loss.backward()
+        grad_reps = reps_for_grad.grad  # (B, D)
+
+        # Pass 2: with-grad — surrogate per chunk, backward immediately
+        offset = 0
         for chunk in chunks:
             _, student_vid = self.img_encoder(chunk)
-            all_student_vids.append(student_vid)
+            chunk_n = student_vid.shape[0]
+            reps_chunk = F.normalize(student_vid, dim=-1)
+            grad_chunk = grad_reps[offset : offset + chunk_n].detach()
+            # Scale by lambda_ground so the optimiser sees ∂(λ·L_ground)/∂params
+            surrogate = self.lambda_ground * torch.dot(
+                reps_chunk.flatten(), grad_chunk.flatten()
+            )
+            surrogate.backward()
+            offset += chunk_n
 
-        student_vid_full = torch.cat(all_student_vids, dim=0)
-        device, dtype = student_vid_full.device, student_vid_full.dtype
-        teacher = F.normalize(
-            src_input["grounding_feats"].to(device, dtype=dtype), dim=-1
-        )
-        student_norm = F.normalize(student_vid_full, dim=-1)
-        ground_loss = _symmetric_info_nce(student_norm, teacher, self.temperature)
-        (self.lambda_ground * ground_loss).backward()
         return ground_loss.detach().item()

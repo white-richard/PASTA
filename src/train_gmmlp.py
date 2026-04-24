@@ -2,20 +2,6 @@ import os
 
 os.environ["USE_TF"] = "0"
 
-# GMMLP — Stage 1 Grounding Pretraining
-#
-# L_stage1 = L_align + λ · L_ground
-#
-#   L_align  (sentence-level contrastive, main GradCache loss)
-#       pool(Perceiver([F_1...F_T])) vs SigLIP text feat
-#
-#   L_ground (frame-level contrastive, aux loss via DictInputWrapper)
-#       pool(proj(ViT(frame))) vs pool(G_t)   — video-level mean
-#
-# Pre-extracted features required:
-#   Grounding: out/descript/features/phoenix_hidden_layer{N}_{split}.pt
-#   SigLIP:    <siglip_feat_path>/{split}.pt  (from descript_embed.py --encoder siglip)
-
 import argparse
 import datetime
 import gc
@@ -65,7 +51,12 @@ def load_siglip_features(path: str | Path) -> dict[str, torch.Tensor]:
     Returns {vid_name: (D_siglip,)} — mean over frame descriptions.
     """
     data = torch.load(path, weights_only=False)
-    return {vid: entry["siglip_feat"].float().mean(dim=0) for vid, entry in data.items()}
+    return {
+        vid: (entry["siglip2_feat"] if "siglip2_feat" in entry else entry["siglip_feat"])
+        .float()
+        .mean(dim=0)
+        for vid, entry in data.items()
+    }
 
 
 def info_nce(a: torch.Tensor, b: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
@@ -78,7 +69,15 @@ def info_nce(a: torch.Tensor, b: torch.Tensor, temperature: float = 0.07) -> tor
 
 
 class GMMLPDataset(Dataset):
-    """Loads PIL frames + pre-pooled grounding feats + SigLIP text feats."""
+    """Loads PIL frames + SigLIP text feats, optionally grounding feats.
+
+    When vis_proj_feats is provided (pre-extracted ViT features from
+    extract_siglip_gap.py), PIL image loading is skipped entirely and the
+    stored (T, D_vit) tensors are returned instead.
+
+    When grounding_feats is None (pre-extracted mode), the grounding objective
+    is disabled and grounding_feats are not included in the batch.
+    """
 
     def __init__(
         self,
@@ -86,32 +85,40 @@ class GMMLPDataset(Dataset):
         config,
         args,
         phase: str,
-        grounding_feats: dict[str, torch.Tensor],
         siglip_feats: dict[str, torch.Tensor],
+        grounding_feats: dict[str, torch.Tensor] | None = None,
+        vis_proj_feats: dict[str, dict] | None = None,
     ) -> None:
         self.config = config
         self.args = args
         self.phase = phase
         self.img_path = config["data"]["img_path"]
         self.max_length = config["data"]["max_length"]
+        self.vis_proj_feats = vis_proj_feats  # {vid_name: {"vis": (T, D_vit)}}
 
         self.raw_data = load_dataset_file(path[phase])
 
         # Pool grounding features to video-level: (T, D) → (D,)
-        self.grounding_feats = {
-            vid: feat.float().mean(dim=0) for vid, feat in grounding_feats.items()
-        }
+        self.grounding_feats = (
+            {vid: feat.float().mean(dim=0) for vid, feat in grounding_feats.items()}
+            if grounding_feats is not None
+            else None
+        )
         # siglip_feats already (D,) per video from load_siglip_features
         self.siglip_feats = siglip_feats
 
-        self.list = [
-            key
-            for key in self.raw_data
-            if key.split("/")[1] in self.grounding_feats and key.split("/")[1] in self.siglip_feats
-        ]
+        required = [self.siglip_feats]
+        if self.grounding_feats is not None:
+            required.append(self.grounding_feats)
+        if vis_proj_feats is not None:
+            required.append(vis_proj_feats)
+
+        self.list = [key for key in self.raw_data if all(key.split("/")[1] in d for d in required)]
         dropped = len(self.raw_data) - len(self.list)
         if dropped:
-            logger.warning(f"[{phase}] Dropped {dropped} videos missing grounding/SigLIP features.")
+            logger.warning(
+                f"[{phase}] Dropped {dropped} videos missing SigLIP/ViT/grounding features.",
+            )
 
     def __len__(self) -> int:
         return len(self.list)
@@ -121,8 +128,20 @@ class GMMLPDataset(Dataset):
         sample = self.raw_data[key]
         vid_name = key.split("/")[1]
 
-        grounding_feat = self.grounding_feats[vid_name]
         siglip_feat = self.siglip_feats[vid_name]
+
+        if self.vis_proj_feats is not None:
+            entry = self.vis_proj_feats[vid_name]
+            vis = entry["vis"]  # (T, D_vit)
+            if len(vis) > self.max_length:
+                idxs = sorted(random.sample(range(len(vis)), self.max_length))
+                vis = vis[idxs]
+            return vid_name, siglip_feat, vis
+
+        if self.grounding_feats is None:
+            msg = "grounding_feats is None but vis_proj_feats is also None — dataset misconfigured"
+            raise RuntimeError(msg)
+        grounding_feat = self.grounding_feats[vid_name]
         pil_frames = self._load_pil_frames(
             [self.img_path + x for x in sample["imgs_path"]],
         )
@@ -138,40 +157,49 @@ class GMMLPDataset(Dataset):
         return frames
 
     def collate_fn(self, batch):
-        _names, siglip_feats, grounding_feats, images = zip(*batch, strict=False)
-        src_input = {
-            "images": list(images),
-            "grounding_feats": torch.stack(list(grounding_feats)),
-            "src_length_batch": torch.tensor([len(imgs) for imgs in images]),
-        }
+        if self.vis_proj_feats is not None:
+            _names, siglip_feats, vis_list = zip(*batch, strict=False)
+            src_input = {
+                "vis_feats": list(vis_list),
+                "src_length_batch": torch.tensor([len(v) for v in vis_list]),
+            }
+        else:
+            _names, siglip_feats, grounding_feats, images = zip(*batch, strict=False)
+            src_input = {
+                "images": list(images),
+                "grounding_feats": torch.stack(list(grounding_feats)),
+                "src_length_batch": torch.tensor([len(imgs) for imgs in images]),
+            }
         tgt_input = {
             "siglip_feat": torch.stack(list(siglip_feats)),
         }
         return src_input, tgt_input
 
     def __str__(self) -> str:
-        return f"#total {self.phase} set: {len(self.list)}."
+        mode = "pre-extracted" if self.vis_proj_feats is not None else "PIL"
+        return f"#total {self.phase} set: {len(self.list)} ({mode})."
 
 
 def split_gmmlp_src_input(model_input: dict, chunk_size: int) -> list[dict]:
     """Split src_input along the video (batch) dimension."""
-    images = model_input["images"]
-    B = len(images)
+    seq = model_input.get("images") or model_input["vis_feats"]
+    B = len(seq)
     chunks = []
     for start in range(0, B, chunk_size):
         end = min(start + chunk_size, B)
-        chunks.append(
-            {
-                "images": images[start:end],
-                "grounding_feats": model_input["grounding_feats"][start:end],
-                "src_length_batch": model_input["src_length_batch"][start:end],
-            },
-        )
+        chunk: dict = {"src_length_batch": model_input["src_length_batch"][start:end]}
+        if "grounding_feats" in model_input:
+            chunk["grounding_feats"] = model_input["grounding_feats"][start:end]
+        if "images" in model_input:
+            chunk["images"] = model_input["images"][start:end]
+        else:
+            chunk["vis_feats"] = model_input["vis_feats"][start:end]
+        chunks.append(chunk)
     return chunks
 
 
 def split_gmmlp_input(model_input: dict, chunk_size: int) -> list[dict]:
-    if "images" in model_input:
+    if "images" in model_input or "vis_feats" in model_input:
         return split_gmmlp_src_input(model_input, chunk_size)
     return split_tgt_input(model_input, chunk_size)
 
@@ -210,104 +238,126 @@ class GMMLPImageEncoder(nn.Module):
         temperature: float,
         image_processor_id: str | None = None,
         align_dim: int | None = None,
+        preextracted_vit_dim: int | None = None,
     ) -> None:
         super().__init__()
-        # Gemma4VisionModel's _position_embeddings creates a (B, max_patches, 2,
-        # position_embedding_size=10240) one-hot tensor — ~180 MB per image at
-        # bfloat16. The full LLM (base) is del'd after init so VRAM is free;
-        # batching 8 frames costs ~1.4 GB which fits on any ≥16 GB GPU.
         self.vision_chunk_size = vision_chunk_size
-        # 70 soft tokens × pooling_kernel_size²=9 → 630 patches → ~400×400 equivalent;
-        # ~24 MB one-hot vs ~788 MB at default 280. Must be in (70, 140, 280, 560, 1120).
         self.gemma4_max_soft_tokens = 70 if model_family == "gemma4" else None
-        # Gradient checkpoint per-layer stores ~23 MB per frame. 500 frames × 23 MB
-        # = 11.5 GB just for saved layer inputs. Cap to keep memory reasonable.
         self.max_frames_with_grad = 128
         self.temperature = temperature
         self.model_family = model_family
 
-        lora_cfg = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
-            bias="none",
-        )
-
-        if model_family == "llava":
-            base = LlavaOnevisionForConditionalGeneration.from_pretrained(
-                model_id,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-            )
-            # Gradient checkpointing cuts activation memory from O(n_layers) to
-            # O(1) at the cost of one extra forward per layer during backward.
-            base.vision_tower = get_peft_model(base.vision_tower, lora_cfg)
-            base.vision_tower.gradient_checkpointing_enable()
-            self.vision_tower = base.vision_tower
-            self.projector = base.multi_modal_projector  # LLaVA MLP: D_vit → D_llm
-            vit_hidden = base.config.vision_config.hidden_size  # 1152 for SigLIP-SO400M
-            del base
-
-        elif model_family == "gemma4":
-            from transformers import Gemma4ForConditionalGeneration
-
-            base = Gemma4ForConditionalGeneration.from_pretrained(
-                model_id,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-            )
-
-            # Gemma4 wraps attention projections in Gemma4ClippableLinear, which
-            # PEFT does not recognise. Replace each wrapper with its inner Linear
-            # so LoRA can inject adapters normally.
-            def _unwrap_clippable(m: torch.nn.Module) -> None:
-                for name, child in list(m.named_children()):
-                    if type(child).__name__ == "Gemma4ClippableLinear":
-                        setattr(m, name, child.linear)
-                    else:
-                        _unwrap_clippable(child)
-
-            _unwrap_clippable(base.model.vision_tower)
-            # Vision tower is nested one level deeper in Gemma4.
-            base.model.vision_tower = get_peft_model(base.model.vision_tower, lora_cfg)
-            base.model.vision_tower.gradient_checkpointing_enable()
-            self.vision_tower = base.model.vision_tower
-            self.projector = base.model.embed_vision  # Gemma4MultimodalEmbedder: D_vit → D_llm
-            vit_hidden = base.config.vision_config.hidden_size
-            del base
-
+        if preextracted_vit_dim is not None:
+            # Pre-extracted mode: skip loading the ViT entirely.
+            # Only the Perceiver (and optional align_proj) are created.
+            self.vision_tower = None
+            self.projector = None
+            self._image_processor = None
+            vit_hidden = preextracted_vit_dim
         else:
-            msg = f"Unknown model_family: {model_family!r}. Choose 'llava' or 'gemma4'."
-            raise ValueError(msg)
+            lora_cfg = LoraConfig(
+                r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+                bias="none",
+            )
 
-        gc.collect()
+            if model_family == "llava":
+                base = LlavaOnevisionForConditionalGeneration.from_pretrained(
+                    model_id,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                )
+                base.vision_tower = get_peft_model(base.vision_tower, lora_cfg)
+                base.vision_tower.gradient_checkpointing_enable()
+                self.vision_tower = base.vision_tower
+                self.projector = base.multi_modal_projector
+                vit_hidden = base.config.vision_config.hidden_size
+                del base
 
-        proc_id = image_processor_id or self._DEFAULT_PROCESSOR[model_family]
-        self._image_processor = AutoImageProcessor.from_pretrained(proc_id)
-        # Mirror gemma4.py: disable pan-and-scan / multi-crop so pixel_values
-        # stays 4-D (B, C, H, W) and doesn't produce 5-D tiled tensors.
-        ip = getattr(self._image_processor, "image_processor", self._image_processor)
-        for attr in ("do_image_splitting", "do_pan_and_scan"):
-            if hasattr(ip, attr):
-                setattr(ip, attr, False)
+            elif model_family == "gemma4":
+                from transformers import Gemma4ForConditionalGeneration
+
+                base = Gemma4ForConditionalGeneration.from_pretrained(
+                    model_id,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                )
+
+                def _unwrap_clippable(m: torch.nn.Module) -> None:
+                    for name, child in list(m.named_children()):
+                        if type(child).__name__ == "Gemma4ClippableLinear":
+                            setattr(m, name, child.linear)
+                        else:
+                            _unwrap_clippable(child)
+
+                _unwrap_clippable(base.model.vision_tower)
+                base.model.vision_tower = get_peft_model(base.model.vision_tower, lora_cfg)
+                base.model.vision_tower.gradient_checkpointing_enable()
+                self.vision_tower = base.model.vision_tower
+                self.projector = base.model.embed_vision
+                vit_hidden = base.config.vision_config.hidden_size
+                del base
+
+            else:
+                msg = f"Unknown model_family: {model_family!r}. Choose 'llava' or 'gemma4'."
+                raise ValueError(msg)
+
+            gc.collect()
+
+            proc_id = image_processor_id or self._DEFAULT_PROCESSOR[model_family]
+            self._image_processor = AutoImageProcessor.from_pretrained(proc_id)
+            ip = getattr(self._image_processor, "image_processor", self._image_processor)
+            for attr in ("do_image_splitting", "do_pan_and_scan"):
+                if hasattr(ip, attr):
+                    setattr(ip, attr, False)
 
         self.perceiver = PerceiverResampler(
             dim=vit_hidden,
             depth=2,
-            dim_head=64,
+            dim_head=64+1,
             heads=8,
             num_latents=num_latents,
             num_media_embeds=num_media_embeds,
         )
 
-        # Optional projection to align Perceiver output dim with text embedding dim.
-        # Needed when vision hidden size (e.g. 768 for Gemma4) differs from the
-        # pre-extracted SigLIP text feature dim (1152 for SigLIP2-so400m).
+        # CLS token: one learnable query that cross-attends to the K Perceiver
+        # latents, replacing GAP. All K latents get gradients through this
+        # attention, while a single vector is produced for the contrastive loss.
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, vit_hidden))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.cls_attn = nn.MultiheadAttention(
+            embed_dim=vit_hidden, num_heads=8, batch_first=True
+        )
+
         if align_dim is not None and align_dim != vit_hidden:
             self.align_proj: nn.Linear | None = nn.Linear(vit_hidden, align_dim)
         else:
             self.align_proj = None
+
+    def _forward_preextracted(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        """Bypass ViT using pre-extracted features; run only the Perceiver.
+
+        vis_feats / proj_feats are lists of (T_i, D_vit) / (T_i, D_llm) tensors.
+        No frame cap is applied: the Perceiver handles long sequences cheaply.
+        """
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        sentence_embs: list[torch.Tensor] = []
+        for vis_frames in src_input["vis_feats"]:
+            vis_frames = vis_frames.to(device, dtype=dtype, non_blocking=True)
+            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D)
+            pooled = out.mean(dim=1)  # (1, K, D) — collapse temporal dim
+            cls = self.cls_token.to(dtype=dtype).expand(1, 1, -1)
+            cls_out, _ = self.cls_attn(cls, pooled, pooled, need_weights=False)
+            sentence_embs.append(cls_out.squeeze(1))  # (1, D)
+        sentence_emb = torch.cat(sentence_embs, dim=0)  # (B, D_vit)
+        if self.align_proj is not None:
+            sentence_emb = self.align_proj(sentence_emb)
+        # No projector in pre-extracted mode; return zeros for student_vid.
+        student_vid = torch.zeros(len(sentence_embs), 1, device=device, dtype=dtype)
+        return F.normalize(sentence_emb, dim=-1), student_vid
 
     def forward(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (sentence_emb, student_vid).
@@ -316,6 +366,9 @@ class GMMLPImageEncoder(nn.Module):
         student_vid  : (B, D_llm)  mean-pooled projected ViT GAP, for L_ground.
         Both are computed from the same ViT forward pass.
         """
+        if "vis_feats" in src_input:
+            return self._forward_preextracted(src_input)
+
         images_batch = src_input["images"]
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
@@ -351,11 +404,11 @@ class GMMLPImageEncoder(nn.Module):
             if vis.dim() == 2:
                 c = len(chunk)
                 vis = vis.view(c, vis.shape[0] // c, vis.shape[-1])
-            proj = self.projector(vis)                 # (c, P, D_llm)
-            vis_pooled_list.append(vis.mean(dim=1))    # (c, D_vit) — GAP over patches
+            proj = self.projector(vis)  # (c, P, D_llm)
+            vis_pooled_list.append(vis.mean(dim=1))  # (c, D_vit) — GAP over patches
             proj_pooled_list.append(proj.mean(dim=1))  # (c, D_llm)
 
-        all_vis = torch.cat(vis_pooled_list, dim=0)    # (total_frames, D_vit)
+        all_vis = torch.cat(vis_pooled_list, dim=0)  # (total_frames, D_vit)
         all_proj = torch.cat(proj_pooled_list, dim=0)  # (total_frames, D_llm)
 
         # Split by video, run Perceiver inline so patch tensors are freed per video.
@@ -363,16 +416,19 @@ class GMMLPImageEncoder(nn.Module):
         proj_means: list[torch.Tensor] = []
         start = 0
         for length in video_lengths:
-            vis_frames = all_vis[start : start + length]    # (T, D_vit)
+            vis_frames = all_vis[start : start + length]  # (T, D_vit)
             proj_frames = all_proj[start : start + length]  # (T, D_llm)
             # (1, T, 1, D_vit): media=T frames, 1 token each — uses temporal pos embs.
-            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D_vit)
-            sentence_embs.append(out.mean(dim=(1, 2)))  # (1, D_vit)
+            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D)
+            pooled = out.mean(dim=1)  # (1, K, D)
+            cls = self.cls_token.to(dtype=dtype).expand(1, 1, -1)
+            cls_out, _ = self.cls_attn(cls, pooled, pooled, need_weights=False)
+            sentence_embs.append(cls_out.squeeze(1))  # (1, D)
             proj_means.append(proj_frames.mean(dim=0))  # (D_llm,)
             start += length
 
         sentence_emb = torch.cat(sentence_embs, dim=0)  # (B, D_vit)
-        student_vid = torch.stack(proj_means)            # (B, D_llm)
+        student_vid = torch.stack(proj_means)  # (B, D_llm)
 
         if self.align_proj is not None:
             sentence_emb = self.align_proj(sentence_emb)  # (B, align_dim)
@@ -392,7 +448,13 @@ class GMMLPTextEncoder(nn.Module):
 
 
 class GMMLP(nn.Module):
-    def __init__(self, args, config, align_dim: int | None = None) -> None:
+    def __init__(
+        self,
+        args,
+        config,
+        align_dim: int | None = None,
+        preextracted_vit_dim: int | None = None,
+    ) -> None:
         super().__init__()
         self.model_image = GMMLPImageEncoder(
             model_id=args.model_id,
@@ -406,6 +468,7 @@ class GMMLP(nn.Module):
             temperature=args.temperature,
             image_processor_id=args.image_processor_id or None,
             align_dim=align_dim,
+            preextracted_vit_dim=preextracted_vit_dim,
         )
         self.model_text = GMMLPTextEncoder()
         self.lambda_ground = args.lambda_ground
@@ -417,6 +480,9 @@ class GMMLP(nn.Module):
         sentence_emb, student_vid = self.model_image(src_input)
         text_feat = self.model_text(tgt_input)
         align_loss = info_nce(sentence_emb, text_feat, self.temperature)
+
+        if self.lambda_ground == 0.0 or "grounding_feats" not in src_input:
+            return align_loss, align_loss, torch.tensor(0.0, device=sentence_emb.device)
 
         device, dtype = sentence_emb.device, sentence_emb.dtype
         teacher = F.normalize(src_input["grounding_feats"].to(device, dtype=dtype), dim=-1)
@@ -475,7 +541,7 @@ def get_args_parser():
     parser.add_argument("--log-memory", action="store_true")
     parser.add_argument("--config", type=str, default="src/configs/config_mmslt_phoenix.yaml")
     parser.add_argument(
-        "--debug_mode",
+        "--debug",
         action="store_true",
         help="1 epoch, 2 batches (smoke test).",
     )
@@ -578,6 +644,17 @@ def get_args_parser():
         help="Path to siglip features .pt file for test split.",
     )
 
+    # Pre-extracted ViT features (from extract_gmmlp_features.py)
+    parser.add_argument(
+        "--preextracted_feat_dir",
+        type=str,
+        default="",
+        help=(
+            "Directory containing features_{split}.pt files from extract_gmmlp_features.py. "
+            "When set, the ViT is bypassed during training and only the Perceiver is trained."
+        ),
+    )
+
     # W&B
     parser.add_argument("--log_all", action="store_true")
     parser.add_argument("--entity", type=str, default=None)
@@ -628,7 +705,7 @@ def train_one_epoch(
             disable=not utils.is_main_process(),
         ),
     ):
-        if args.debug_mode and step >= 2:
+        if args.debug and step >= 10:
             print("DEBUG MODE: stopping after 2 batches.")
             break
 
@@ -670,7 +747,7 @@ def evaluate(args, data_loader, model: GMMLP, epoch: int, device: torch.device) 
     for step, (src_input, tgt_input) in enumerate(
         metric_logger.log_every(data_loader, print_freq, header),
     ):
-        if args.debug_mode and step >= 2:
+        if args.debug and step >= 2:
             print("DEBUG MODE: stopping after 2 batches.")
             break
 
@@ -735,13 +812,15 @@ def main(args, config) -> None:
     random.seed(args.seed)
     cudnn.benchmark = True
 
-    print("Loading grounding features …")
-    grounding_all = load_descript_features(
-        args.grounding_feat_dir,
-        splits=["train", "dev", "test"],
-        hidden_layer=args.grounding_hidden_layer,
-        device="cpu",
-    )
+    grounding_all: dict | None = None
+    if not args.preextracted_feat_dir:
+        print("Loading grounding features …")
+        grounding_all = load_descript_features(
+            args.grounding_feat_dir,
+            splits=["train", "dev", "test"],
+            hidden_layer=args.grounding_hidden_layer,
+            device="cpu",
+        )
 
     print("Loading SigLIP text features …")
     siglip_by_split = {
@@ -749,6 +828,19 @@ def main(args, config) -> None:
         "dev": load_siglip_features(args.siglip_feat_dev),
         "test": load_siglip_features(args.siglip_feat_test),
     }
+
+    vis_proj_by_split: dict[str, dict] | dict[str, None] = {
+        "train": None,
+        "dev": None,
+        "test": None,
+    }
+    if args.preextracted_feat_dir:
+        feat_dir = Path(args.preextracted_feat_dir)
+        print(f"Loading pre-extracted ViT features from {feat_dir} …")
+        for split in ["train", "dev", "test"]:
+            p = feat_dir / f"features_{split}.pt"
+            vis_proj_by_split[split] = torch.load(p, map_location="cpu", weights_only=False)
+            print(f"  [{split}] loaded {len(vis_proj_by_split[split])} videos")
 
     print("Creating datasets …")
 
@@ -758,8 +850,9 @@ def main(args, config) -> None:
             config=config,
             args=args,
             phase=phase,
-            grounding_feats=grounding_all,
             siglip_feats=siglip_by_split[phase],
+            grounding_feats=grounding_all,
+            vis_proj_feats=vis_proj_by_split[phase],
         )
 
     train_data = make_dataset("train")
@@ -781,7 +874,7 @@ def main(args, config) -> None:
             "collate_fn": train_data.collate_fn,
             "sampler": train_sampler,
             "pin_memory": False,  # PIL lists can't be pinned
-            "drop_last": True,
+            "drop_last": False,
             "persistent_workers": args.num_workers > 0,
         }
         if args.num_workers > 0:
@@ -808,7 +901,27 @@ def main(args, config) -> None:
     # --- Model ---
     print("Creating GMMLP model …")
     siglip_dim = next(iter(siglip_by_split["train"].values())).shape[-1]
-    model = GMMLP(args=args, config=config, align_dim=siglip_dim).to(device)
+
+    # When using pre-extracted features, read D_vit from file metadata so the
+    # Perceiver is built with the correct dimension and the ViT is not loaded.
+    preextracted_vit_dim: int | None = None
+    if args.preextracted_feat_dir:
+        train_feats = vis_proj_by_split["train"]
+        meta = train_feats.get("_meta", {})
+        if "d_vit" in meta:
+            preextracted_vit_dim = meta["d_vit"]
+        else:
+            # Fall back: infer from first video's vis tensor.
+            first_vid = next(v for k, v in train_feats.items() if k != "_meta")
+            preextracted_vit_dim = first_vid["vis"].shape[-1]
+        print(f"Pre-extracted mode: D_vit={preextracted_vit_dim}, ViT not loaded.")
+
+    model = GMMLP(
+        args=args,
+        config=config,
+        align_dim=siglip_dim,
+        preextracted_vit_dim=preextracted_vit_dim,
+    ).to(device)
 
     if args.finetune:
         ckpt = torch.load(args.finetune, map_location="cpu")
@@ -842,7 +955,7 @@ def main(args, config) -> None:
             )
         return
 
-    if args.debug_mode:
+    if args.debug:
         args.epochs = args.start_epoch + 1
 
     print(f"Start training for {args.epochs} epochs")
