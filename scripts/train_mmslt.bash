@@ -20,12 +20,12 @@ else
 fi
 
 monitor_cmd "train_mmslt" "${OUTPUT_DIR}" python src/train_mmslt.py \
-  --batch-size 16 \
-  --epochs 80 \
+  --batch-size 8 \
+  --epochs 10 \
   --opt adamw \
-  --lr 1e-3 \
+  --lr 1e-4 \
   --weight-decay 0.001 \
-  --warmup-epochs 0 \
+  --warmup-epochs 1 \
   --config "${CONFIG}" \
   --vision_backbone "${VISION_BACKBONE}" \
   --output_dir "${OUTPUT_DIR}" \

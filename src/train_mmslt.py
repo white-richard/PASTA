@@ -256,7 +256,7 @@ def get_args_parser():
 
     # * debug
     parser.add_argument(
-        "--debug_mode",
+        "--debug",
         action="store_true",
         help="Run in debug mode: only 1 epoch and 2 batches per split.",
     )
@@ -466,7 +466,7 @@ def main(args, config) -> None:
         )
         return
 
-    if args.debug_mode:
+    if args.debug:
         print("*** DEBUG MODE: overriding epochs to 1 ***")
         args.epochs = args.start_epoch + 1
 
@@ -644,7 +644,7 @@ def train_one_epoch(
         if (step + 1) % 10 == 0 and args.visualize:
             utils.visualization(model.visualize())
 
-        if args.debug_mode and step >= 1:
+        if args.debug and step >= 1:
             print("*** DEBUG MODE: stopping after 2 batches ***")
             break
 
@@ -719,7 +719,7 @@ def evaluate(
             if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
                 utils.visualization(model_without_ddp.visualize())
 
-            if args.debug_mode and step >= 1:
+            if args.debug and step >= 1:
                 print("*** DEBUG MODE: stopping after 2 batches ***")
                 break
 
