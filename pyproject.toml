@@ -15,6 +15,7 @@ dependencies = [
     "pillow",
     "numpy",
     "opencv-python-headless",
+    "sacrebleu",
     "scikit-image",
     "accelerate",
     "dvc",

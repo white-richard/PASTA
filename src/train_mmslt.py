@@ -213,6 +213,17 @@ def get_args_parser():
         action="store_true",
         help="Log process/CUDA memory periodically.",
     )
+    parser.add_argument(
+        "--language_decoder",
+        default="mbart",
+        choices=["mbart", "gemma4"],
+        help="Language decoder backend: mbart (default) or gemma4 (LoRA on global MLP expert + attention)",
+    )
+    parser.add_argument(
+        "--gemma4_model_id",
+        default="google/gemma-4-E2B-it",
+        help="HuggingFace model ID for Gemma4 when --language_decoder=gemma4",
+    )
 
     # *Drop out params
     parser.add_argument(
@@ -245,7 +256,7 @@ def get_args_parser():
 
     # * debug
     parser.add_argument(
-        "--debug_mode",
+        "--debug",
         action="store_true",
         help="Run in debug mode: only 1 epoch and 2 batches per split.",
     )
@@ -267,12 +278,17 @@ def main(args, config) -> None:
     cudnn.benchmark = True
 
     print("Creating dataset:")
-    tokenizer = MBart50TokenizerFast.from_pretrained(
-        "facebook/mbart-large-50-many-to-many-mmt",
-        src_lang="de_DE",
-        tgt_lang="de_DE",
-        model_max_length=1024,
-    )
+    if args.language_decoder == "gemma4":
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(args.gemma4_model_id)
+    else:
+        tokenizer = MBart50TokenizerFast.from_pretrained(
+            "facebook/mbart-large-50-many-to-many-mmt",
+            src_lang="de_DE",
+            tgt_lang="de_DE",
+            model_max_length=1024,
+        )
 
     train_data = S2T_Dataset(
         path=config["data"]["label_path"],
@@ -344,7 +360,13 @@ def main(args, config) -> None:
 
     print("Creating model:")
 
-    model = MMSLT(config, args, vision_backbone=args.vision_backbone)
+    model = MMSLT(
+        config,
+        args,
+        vision_backbone=args.vision_backbone,
+        language_decoder=args.language_decoder,
+        gemma4_model_id=args.gemma4_model_id,
+    )
     model.to(device)
 
     if args.finetune:
@@ -444,7 +466,7 @@ def main(args, config) -> None:
         )
         return
 
-    if args.debug_mode:
+    if args.debug:
         print("*** DEBUG MODE: overriding epochs to 1 ***")
         args.epochs = args.start_epoch + 1
 
@@ -540,7 +562,7 @@ def main(args, config) -> None:
             test_model_path = output_dir / "checkpoint.pth"
             print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
         checkpoint = torch.load(test_model_path, map_location="cpu", weights_only=False)
-        model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
+        model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
 
         test_stats = evaluate(
             args,
@@ -622,7 +644,7 @@ def train_one_epoch(
         if (step + 1) % 10 == 0 and args.visualize:
             utils.visualization(model.visualize())
 
-        if args.debug_mode and step >= 1:
+        if args.debug and step >= 1:
             print("*** DEBUG MODE: stopping after 2 batches ***")
             break
 
@@ -665,11 +687,16 @@ def evaluate(
             metric_logger.update(loss=tgt_loss.item())
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                forced_bos = (
+                    None
+                    if args.language_decoder == "gemma4"
+                    else tokenizer.lang_code_to_id["de_DE"]
+                )
                 output = model_without_ddp.generate(
                     src_input,
                     max_new_tokens=150,
                     num_beams=8,
-                    forced_bos_token_id=tokenizer.lang_code_to_id["de_DE"],
+                    forced_bos_token_id=forced_bos,
                 )
             pred_texts = tokenizer.batch_decode(output.detach().cpu(), skip_special_tokens=True)
             ref_texts = tokenizer.batch_decode(tgt_input["input_ids"], skip_special_tokens=True)
@@ -692,7 +719,7 @@ def evaluate(
             if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
                 utils.visualization(model_without_ddp.visualize())
 
-            if args.debug_mode and step >= 1:
+            if args.debug and step >= 1:
                 print("*** DEBUG MODE: stopping after 2 batches ***")
                 break
 
