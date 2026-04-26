@@ -13,6 +13,7 @@ from torchvision import transforms
 from vidaug import augmentors as va
 
 from definition import *
+from utils import data_augmentation
 
 
 # Datasets for Generating Descriptions
@@ -228,11 +229,15 @@ class S2T_Dataset(Dataset):
         key = self.list[index]
         sample = self.raw_data[key]
 
-        descript_sample = self.descript_feat[key.split("/")[1]]["bert_feat"]
+        descript_sample = self.descript_feat[key.split("/")[1]]["siglip2_feat"]
         tgt_sample = sample["text"]
         name_sample = sample["name"]
 
-        img_sample = self.load_imgs([self.img_path + x for x in sample["imgs_path"]])
+        img_sample, selected_indices = self.load_imgs(
+            [self.img_path + x for x in sample["imgs_path"]]
+        )
+        if selected_indices is not None:
+            descript_sample = descript_sample[selected_indices]
 
         return name_sample, descript_sample, tgt_sample, img_sample
 
@@ -244,12 +249,10 @@ class S2T_Dataset(Dataset):
                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ],
         )
+        selected_indices = None
         if len(paths) > self.max_length:
-            tmp = sorted(random.sample(range(len(paths)), k=self.max_length))
-            new_paths = []
-            for i in tmp:
-                new_paths.append(paths[i])
-            paths = new_paths
+            selected_indices = sorted(random.sample(range(len(paths)), k=self.max_length))
+            paths = [paths[i] for i in selected_indices]
 
         imgs = torch.zeros(len(paths), 3, self.args.input_size, self.args.input_size)
         crop_rect, resize = data_augmentation(
@@ -281,7 +284,7 @@ class S2T_Dataset(Dataset):
                 crop_rect[0] : crop_rect[2],
             ]
 
-        return imgs
+        return imgs, selected_indices
 
     def collate_fn(self, batch):
 
