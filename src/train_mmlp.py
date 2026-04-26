@@ -448,10 +448,6 @@ def main(args, config) -> None:
     for epoch in range(args.start_epoch, args.epochs):
         log_memory(args, f"epoch_{epoch}_start")
 
-        # Recreate each epoch so that when training finishes the DataLoader and
-        # all its worker processes are garbage-collected before evaluation
-        # starts.  Without this, 16 train workers + eval workers exhaust RAM
-        # and the OOM killer fires at the first eval batch.
         train_dataloader = make_train_dataloader()
         train_stats = train_one_epoch(
             args,

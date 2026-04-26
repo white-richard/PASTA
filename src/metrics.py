@@ -1156,8 +1156,8 @@ SUBSETS = {
     "euronews-en.153826=EU-sport cnn.304400=US-world",
 }
 SUBSETS = {k: {d.split("=")[0]: d.split("=")[1] for d in v.split()} for (k, v) in SUBSETS.items()}
-COUNTRIES = sorted(list({v.split("-")[0] for v in SUBSETS["wmt19"].values()}))
-DOMAINS = sorted(list({v.split("-")[1] for v in SUBSETS["wmt19"].values()}))
+COUNTRIES = sorted({v.split("-")[0] for v in SUBSETS["wmt19"].values()})
+DOMAINS = sorted({v.split("-")[1] for v in SUBSETS["wmt19"].values()})
 
 WER_COST_DEL = 3
 WER_COST_INS = 3
@@ -1165,13 +1165,11 @@ WER_COST_SUB = 4
 
 
 def tokenize_13a(line):
-    """
-    Tokenizes an input line using a relatively minimal tokenization that is however equivalent to mteval-v13a, used by WMT.
+    """Tokenizes an input line using a relatively minimal tokenization that is however equivalent to mteval-v13a, used by WMT.
 
     :param line: a segment to tokenize
     :return: the tokenized line
     """
-
     norm = line
 
     # language-independent part:
@@ -1187,23 +1185,26 @@ def tokenize_13a(line):
     norm = f" {norm} "
     norm = re.sub(r"([\{-\~\[-\` -\&\(-\+\:-\@\/])", " \\1 ", norm)
     norm = re.sub(
-        r"([^0-9])([\.,])", "\\1 \\2 ", norm
+        r"([^0-9])([\.,])",
+        "\\1 \\2 ",
+        norm,
     )  # tokenize period and comma unless preceded by a digit
     norm = re.sub(
-        r"([\.,])([^0-9])", " \\1 \\2", norm
+        r"([\.,])([^0-9])",
+        " \\1 \\2",
+        norm,
     )  # tokenize period and comma unless followed by a digit
     norm = re.sub(r"([0-9])(-)", "\\1 \\2 ", norm)  # tokenize dash when preceded by a digit
     norm = re.sub(r"\s+", " ", norm)  # one space only between words
     norm = re.sub(r"^\s+", "", norm)  # no leading space
-    norm = re.sub(r"\s+$", "", norm)  # no trailing space
-
-    return norm
+    return re.sub(r"\s+$", "", norm)  # no trailing space
 
 
 class UnicodeRegex:
     """Ad-hoc hack to recognize all punctuation and symbols.
 
-    without depending on https://pypi.python.org/pypi/regex/."""
+    without depending on https://pypi.python.org/pypi/regex/.
+    """
 
     @staticmethod
     def _property_chars(prefix):
@@ -1261,7 +1262,7 @@ def tokenize_v14_international(string):
 
 def tokenize_zh(sentence):
     """MIT License
-    Copyright (c) 2017 - Shujian Huang <huangsj@nju.edu.cn>
+    Copyright (c) 2017 - Shujian Huang <huangsj@nju.edu.cn>.
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -1289,74 +1290,53 @@ def tokenize_zh(sentence):
     :return: tokenized sentence
     """
 
-    def is_chinese_char(uchar):
-        """
-        :param uchar: input char in unicode
+    def is_chinese_char(uchar) -> bool:
+        """:param uchar: input char in unicode
         :return: whether the input char is a Chinese character.
         """
         if (
             uchar >= "\u3400" and uchar <= "\u4db5"
         ):  # CJK Unified Ideographs Extension A, release 3.0
             return True
-        elif (
-            uchar >= "\u4e00"
-            and uchar <= "\u9fa5"
-            or uchar >= "\u9fa6"
-            and uchar <= "\u9fbb"
-            or uchar >= "\uf900"
-            and uchar <= "\ufa2d"
-            or uchar >= "\ufa30"
-            and uchar <= "\ufa6a"
-            or uchar >= "\ufa70"
-            and uchar <= "\ufad9"
+        if (
+            (uchar >= "\u4e00" and uchar <= "\u9fa5")
+            or (uchar >= "\u9fa6" and uchar <= "\u9fbb")
+            or (uchar >= "\uf900" and uchar <= "\ufa2d")
+            or (uchar >= "\ufa30" and uchar <= "\ufa6a")
+            or (uchar >= "\ufa70" and uchar <= "\ufad9")
         ):  # CJK Unified Ideographs, release 1.1
             return True
-        elif (
+        if (
             uchar >= "\u20000" and uchar <= "\u2a6d6"
         ):  # CJK Unified Ideographs Extension B, release 3.1
             return True
-        elif uchar >= "\u2f800" and uchar <= "\u2fa1d":  # CJK Compatibility Supplement, release 3.1
+        if uchar >= "\u2f800" and uchar <= "\u2fa1d":  # CJK Compatibility Supplement, release 3.1
             return True
-        elif (
+        if (
             uchar >= "\uff00" and uchar <= "\uffef"
         ):  # Full width ASCII, full width of English punctuation, half width Katakana, half wide half width kana, Korean alphabet
             return True
-        elif (
-            uchar >= "\u2e80"
-            and uchar <= "\u2eff"
-            or uchar >= "\u3000"
-            and uchar <= "\u303f"
-            or uchar >= "\u31c0"
-            and uchar <= "\u31ef"
-            or uchar >= "\u2f00"
-            and uchar <= "\u2fdf"
-            or uchar >= "\u2ff0"
-            and uchar <= "\u2fff"
-            or uchar >= "\u3100"
-            and uchar <= "\u312f"
+        if (
+            (uchar >= "\u2e80" and uchar <= "\u2eff")
+            or (uchar >= "\u3000" and uchar <= "\u303f")
+            or (uchar >= "\u31c0" and uchar <= "\u31ef")
+            or (uchar >= "\u2f00" and uchar <= "\u2fdf")
+            or (uchar >= "\u2ff0" and uchar <= "\u2fff")
+            or (uchar >= "\u3100" and uchar <= "\u312f")
         ):  # CJK Radicals Supplement
             return True
-        elif (
+        if (
             uchar >= "\u31a0" and uchar <= "\u31bf"
         ):  # Phonetic symbols (Taiwanese and Hakka expansion)
             return True
-        elif (
-            uchar >= "\ufe10"
-            and uchar <= "\ufe1f"
-            or uchar >= "\ufe30"
-            and uchar <= "\ufe4f"
-            or uchar >= "\u2600"
-            and uchar <= "\u26ff"
-            or uchar >= "\u2700"
-            and uchar <= "\u27bf"
-            or uchar >= "\u3200"
-            and uchar <= "\u32ff"
-            or uchar >= "\u3300"
-            and uchar <= "\u33ff"
-        ):
-            return True
-
-        return False
+        return bool(
+            (uchar >= "︐" and uchar <= "\ufe1f")
+            or (uchar >= "︰" and uchar <= "﹏")
+            or (uchar >= "☀" and uchar <= "⛿")
+            or (uchar >= "✀" and uchar <= "➿")
+            or (uchar >= "㈀" and uchar <= "㋿")
+            or (uchar >= "㌀" and uchar <= "㏿"),
+        )
 
     sentence = sentence.strip()
     sentence_in_chars = ""
@@ -1389,9 +1369,7 @@ def tokenize_zh(sentence):
     sentence = re.sub(r"\s+", r" ", sentence)
 
     # no leading or trailing spaces
-    sentence = sentence.strip()
-
-    return sentence
+    return sentence.strip()
 
 
 TOKENIZERS = {
@@ -1415,25 +1393,21 @@ def smart_open(file, mode="rt", encoding="utf-8"):
 
 
 def my_log(num):
-    """
-    Floors the log function
+    """Floors the log function.
 
     :param num: the number
     :return: log(num) floored to a very low number
     """
-
     if num == 0.0:
         return -9999999999
     return math.log(num)
 
 
 def bleu_signature(args, numrefs):
-    """
-    Builds a signature that uniquely identifies the scoring parameters used.
+    """Builds a signature that uniquely identifies the scoring parameters used.
     :param args: the arguments passed into the script
-    :return: the signature
+    :return: the signature.
     """
-
     # Abbreviations for the signature
     abbr = {
         "test": "t",
@@ -1466,20 +1440,16 @@ def bleu_signature(args, numrefs):
     if args.subset is not None:
         signature["subset"] = args.subset
 
-    sigstr = "+".join(
-        [f"{abbr[x] if args.short else x}.{signature[x]}" for x in sorted(signature.keys())]
+    return "+".join(
+        [f"{abbr[x] if args.short else x}.{signature[x]}" for x in sorted(signature.keys())],
     )
-
-    return sigstr
 
 
 def chrf_signature(args, numrefs):
-    """
-    Builds a signature that uniquely identifies the scoring parameters used.
+    """Builds a signature that uniquely identifies the scoring parameters used.
     :param args: the arguments passed into the script
-    :return: the chrF signature
+    :return: the chrF signature.
     """
-
     # Abbreviations for the signature
     abbr = {
         "test": "t",
@@ -1512,11 +1482,9 @@ def chrf_signature(args, numrefs):
     if args.subset is not None:
         signature["subset"] = args.subset
 
-    sigstr = "+".join(
-        [f"{abbr[x] if args.short else x}.{signature[x]}" for x in sorted(signature.keys())]
+    return "+".join(
+        [f"{abbr[x] if args.short else x}.{signature[x]}" for x in sorted(signature.keys())],
     )
-
-    return sigstr
 
 
 def extract_ngrams(line, min_order=1, max_order=NGRAM_ORDER) -> Counter:
@@ -1527,11 +1495,10 @@ def extract_ngrams(line, min_order=1, max_order=NGRAM_ORDER) -> Counter:
     :param max_order: Maximum n-gram length (default: NGRAM_ORDER).
     :return: a dictionary containing ngrams and counts
     """
-
     ngrams = Counter()
     tokens = line.split()
     for n in range(min_order, max_order + 1):
-        for i in range(0, len(tokens) - n + 1):
+        for i in range(len(tokens) - n + 1):
             ngram = " ".join(tokens[i : i + n])
             ngrams[ngram] += 1
 
@@ -1539,9 +1506,7 @@ def extract_ngrams(line, min_order=1, max_order=NGRAM_ORDER) -> Counter:
 
 
 def extract_char_ngrams(s: str, n: int) -> Counter:
-    """
-    Yields counts of character n-grams from string s of order n.
-    """
+    """Yields counts of character n-grams from string s of order n."""
     return Counter([s[i : i + n] for i in range(len(s) - n + 1)])
 
 
@@ -1557,19 +1522,17 @@ def ref_stats(output, refs):
             closest_diff = diff
             closest_len = reflen
         elif diff == closest_diff:
-            if reflen < closest_len:
-                closest_len = reflen
+            closest_len = min(closest_len, reflen)
 
         ngrams_ref = extract_ngrams(ref)
-        for ngram in ngrams_ref.keys():
+        for ngram in ngrams_ref:
             ngrams[ngram] = max(ngrams[ngram], ngrams_ref[ngram])
 
     return ngrams, closest_diff, closest_len
 
 
 def _clean(s):
-    """
-    Removes trailing and leading spaces and collapses multiple consecutive internal spaces to a single one.
+    """Removes trailing and leading spaces and collapses multiple consecutive internal spaces to a single one.
 
     :param s: The string.
     :return: A cleaned-up string.
@@ -1577,16 +1540,15 @@ def _clean(s):
     return re.sub(r"\s+", " ", s.strip())
 
 
-def process_to_text(rawfile, txtfile, field: int = None):
+def process_to_text(rawfile, txtfile, field: int | None = None) -> None:
     """Processes raw files to plain text files.
     :param rawfile: the input file (possibly SGML)
     :param txtfile: the plaintext file
     :param field: For TSV files, which field to extract.
     """
-
     if not os.path.exists(txtfile) or os.path.getsize(txtfile) == 0:
         logging.info("Processing %s to %s", rawfile, txtfile)
-        if rawfile.endswith(".sgm") or rawfile.endswith(".sgml") or rawfile.endswith(".xml"):
+        if rawfile.endswith((".sgm", ".sgml", ".xml")):
             with smart_open(rawfile) as fin, smart_open(txtfile, "wt") as fout:
                 for line in fin:
                     if line.startswith("<seg "):
@@ -1604,15 +1566,14 @@ def process_to_text(rawfile, txtfile, field: int = None):
                     print(line.rstrip().split("\t")[field], file=fout)
 
 
-def print_test_set(test_set, langpair, side, origlang=None, subset=None):
+def print_test_set(test_set, langpair, side, origlang=None, subset=None) -> None:
     """Prints to STDOUT the specified side of the specified test set
     :param test_set: the test set to print
     :param langpair: the language pair
     :param side: 'src' for source, 'ref' for reference
     :param origlang: print only sentences with a given original language (2-char ISO639-1 code), "non-" prefix means negation
-    :param subset: print only sentences whose document annotation matches a given regex
+    :param subset: print only sentences whose document annotation matches a given regex.
     """
-
     files = download_test_set(test_set, langpair)
     if side == "src":
         files = [files[0]]
@@ -1621,8 +1582,8 @@ def print_test_set(test_set, langpair, side, origlang=None, subset=None):
 
     streams = [smart_open(file) for file in files]
     streams = _filter_subset(streams, test_set, langpair, origlang, subset)
-    for lines in zip(*streams):
-        print("\t".join(map(lambda x: x.rstrip(), lines)))
+    for lines in zip(*streams, strict=False):
+        print("\t".join(x.rstrip() for x in lines))
 
 
 def download_test_set(test_set, langpair=None):
@@ -1632,12 +1593,11 @@ def download_test_set(test_set, langpair=None):
     :param langpair: the language pair (needed for some datasets)
     :return: the set of processed files
     """
-
     outdir = os.path.join(SACREBLEU_DIR, test_set)
     os.makedirs(outdir, exist_ok=True)
 
     expected_checksums = DATASETS[test_set].get("md5", [None] * len(DATASETS[test_set]))
-    for dataset, expected_md5 in zip(DATASETS[test_set]["data"], expected_checksums):
+    for dataset, expected_md5 in zip(DATASETS[test_set]["data"], expected_checksums, strict=False):
         tarball = os.path.join(outdir, os.path.basename(dataset))
         rawdir = os.path.join(outdir, "raw")
 
@@ -1652,7 +1612,7 @@ def download_test_set(test_set, langpair=None):
                     logging.warning(
                         "An SSL error was encountered in downloading the files. If you're on a Mac, "
                         'you may need to run the "Install Certificates.command" file located in the '
-                        '"Python 3" folder, often found under /Applications'
+                        '"Python 3" folder, often found under /Applications',
                     )
                     sys.exit(1)
 
@@ -1664,11 +1624,11 @@ def download_test_set(test_set, langpair=None):
                             md5.update(line)
                     if md5.hexdigest() != expected_md5:
                         logging.error(
-                            f"Fatal: MD5 sum of downloaded file was incorrect (got {md5.hexdigest()}, expected {expected_md5})."
+                            f"Fatal: MD5 sum of downloaded file was incorrect (got {md5.hexdigest()}, expected {expected_md5}).",
                         )
                         logging.error(f'Please manually delete "{tarball}" and rerun the command.')
                         logging.error(
-                            "If the problem persists, the tarball may have changed, in which case, please contact the SacreBLEU maintainer."
+                            "If the problem persists, the tarball may have changed, in which case, please contact the SacreBLEU maintainer.",
                         )
                         sys.exit(1)
                     else:
@@ -1676,7 +1636,7 @@ def download_test_set(test_set, langpair=None):
 
                 # Extract the tarball
                 logging.info("Extracting %s", tarball)
-                if tarball.endswith(".tar.gz") or tarball.endswith(".tgz"):
+                if tarball.endswith((".tar.gz", ".tgz")):
                     import tarfile
 
                     tar = tarfile.open(tarball)
@@ -1724,15 +1684,15 @@ def download_test_set(test_set, langpair=None):
 
 
 class Result:
-    def __init__(self, score: float):
+    def __init__(self, score: float) -> None:
         self.score = score
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.format()
 
 
 class BLEU:
-    def __init__(self, scores, counts, totals, precisions, bp, sys_len, ref_len):
+    def __init__(self, scores, counts, totals, precisions, bp, sys_len, ref_len) -> None:
 
         self.scores = scores
         self.counts = counts
@@ -1742,13 +1702,13 @@ class BLEU:
         self.sys_len = sys_len
         self.ref_len = ref_len
 
-    def format(self, width=2):
+    def format(self, width=2) -> str:
         precisions = "/".join([f"{p:.1f}" for p in self.precisions])
         return f"BLEU = {self.scores} {precisions} (BP = {self.bp:.3f} ratio = {self.sys_len / self.ref_len:.3f} hyp_len = {self.sys_len:d} ref_len = {self.ref_len:d})"
 
 
 class CHRF(Result):
-    def __init__(self, score: float):
+    def __init__(self, score: float) -> None:
         super().__init__(score)
 
     def format(self, width=2):
@@ -1783,7 +1743,6 @@ def compute_bleu(
     :param use_effective_order: If true, use the length of `correct` for the n-gram order instead of NGRAM_ORDER.
     :return: A BLEU object with the score (100-based) and other statistics.
     """
-
     precisions = [0 for x in range(NGRAM_ORDER)]
 
     smooth_mteval = 1.0
@@ -1820,7 +1779,7 @@ def compute_bleu(
     for effective_order in range(1, NGRAM_ORDER + 1):
         scores.append(
             brevity_penalty
-            * math.exp(sum(map(my_log, precisions[:effective_order])) / effective_order)
+            * math.exp(sum(map(my_log, precisions[:effective_order])) / effective_order),
         )
 
     return BLEU(scores, correct, total, precisions, brevity_penalty, sys_len, ref_len)
@@ -1833,8 +1792,7 @@ def sentence_bleu(
     smooth_value: float = SMOOTH_VALUE_DEFAULT,
     use_effective_order: bool = True,
 ) -> BLEU:
-    """
-    Computes BLEU on a single sentence pair.
+    """Computes BLEU on a single sentence pair.
 
     Disclaimer: computing BLEU on the sentence level is not its intended use,
     BLEU is a corpus-level metric.
@@ -1845,14 +1803,13 @@ def sentence_bleu(
     :param use_effective_order: Account for references that are shorter than the largest n-gram.
     :return: Returns a single BLEU score as a float.
     """
-    bleu = corpus_bleu(
+    return corpus_bleu(
         hypothesis,
         references,
         smooth_method=smooth_method,
         smooth_value=smooth_value,
         use_effective_order=use_effective_order,
     )
-    return bleu
 
 
 def corpus_bleu(
@@ -1876,7 +1833,6 @@ def corpus_bleu(
     :param tokenize: The tokenizer to use
     :return: a BLEU object containing everything you'd want
     """
-
     # Add some robustness to the input arguments
     if isinstance(sys_stream, str):
         sys_stream = [sys_stream]
@@ -1892,10 +1848,11 @@ def corpus_bleu(
     # look for already-tokenized sentences
     tokenized_count = 0
 
-    fhs = [sys_stream] + ref_streams
+    fhs = [sys_stream, *ref_streams]
     for lines in zip_longest(*fhs):
         if None in lines:
-            raise EOFError("Source and reference streams have different lengths!")
+            msg = "Source and reference streams have different lengths!"
+            raise EOFError(msg)
 
         if lowercase:
             lines = [x.lower() for x in lines]
@@ -1906,21 +1863,21 @@ def corpus_bleu(
             if tokenized_count == 100:
                 logging.warning("That's 100 lines that end in a tokenized period ('.')")
                 logging.warning(
-                    "It looks like you forgot to detokenize your test data, which may hurt your score."
+                    "It looks like you forgot to detokenize your test data, which may hurt your score.",
                 )
                 logging.warning(
-                    "If you insist your data is detokenized, or don't care, you can suppress this message with '--force'."
+                    "If you insist your data is detokenized, or don't care, you can suppress this message with '--force'.",
                 )
 
         output, *refs = [TOKENIZERS[tokenize](x.rstrip()) for x in lines]
 
-        ref_ngrams, closest_diff, closest_len = ref_stats(output, refs)
+        ref_ngrams, _closest_diff, closest_len = ref_stats(output, refs)
 
         sys_len += len(output.split())
         ref_len += closest_len
 
         sys_ngrams = extract_ngrams(output)
-        for ngram in sys_ngrams.keys():
+        for ngram in sys_ngrams:
             n = len(ngram.split())
             correct[n - 1] += min(sys_ngrams[ngram], ref_ngrams.get(ngram, 0))
             total[n - 1] += sys_ngrams[ngram]
@@ -1956,9 +1913,7 @@ def raw_corpus_bleu(sys_stream, ref_streams, smooth_value=SMOOTH_VALUE_DEFAULT) 
 
 
 def delete_whitespace(text: str) -> str:
-    """
-    Removes whitespaces from text.
-    """
+    """Removes whitespaces from text."""
     return re.sub(r"\s+", "", text).strip()
 
 
@@ -1989,9 +1944,12 @@ def get_corpus_statistics(
     remove_whitespace: bool = True,
 ) -> list[float]:
     corpus_statistics = [0] * (order * 3)
-    for hypothesis, reference in zip(hypotheses, references):
+    for hypothesis, reference in zip(hypotheses, references, strict=False):
         statistics = get_sentence_statistics(
-            hypothesis, reference, order=order, remove_whitespace=remove_whitespace
+            hypothesis,
+            reference,
+            order=order,
+            remove_whitespace=remove_whitespace,
         )
         for i in range(len(statistics)):
             corpus_statistics[i] += statistics[i]
@@ -2021,12 +1979,11 @@ def _chrf(avg_precision, avg_recall, beta: int = CHRF_BETA) -> float:
     if avg_precision + avg_recall == 0:
         return 0.0
     beta_square = beta**2
-    score = (
+    return (
         (1 + beta_square)
         * (avg_precision * avg_recall)
         / ((beta_square * avg_precision) + avg_recall)
     )
-    return score
 
 
 def corpus_chrf(
@@ -2036,8 +1993,7 @@ def corpus_chrf(
     beta: float = CHRF_BETA,
     remove_whitespace: bool = True,
 ) -> CHRF:
-    """
-    Computes Chrf on a corpus.
+    """Computes Chrf on a corpus.
 
     :param hypotheses: Stream of hypotheses.
     :param references: Stream of references
@@ -2047,7 +2003,10 @@ def corpus_chrf(
     :return: Chrf score.
     """
     corpus_statistics = get_corpus_statistics(
-        hypotheses, references, order=order, remove_whitespace=remove_whitespace
+        hypotheses,
+        references,
+        order=order,
+        remove_whitespace=remove_whitespace,
     )
     avg_precision, avg_recall = _avg_precision_and_recall(corpus_statistics, order)
     return CHRF(_chrf(avg_precision, avg_recall, beta=beta))
@@ -2060,8 +2019,7 @@ def sentence_chrf(
     beta: float = CHRF_BETA,
     remove_whitespace: bool = True,
 ) -> CHRF:
-    """
-    Computes ChrF on a single sentence pair.
+    """Computes ChrF on a single sentence pair.
 
     :param hypothesis: Hypothesis string.
     :param reference: Reference string.
@@ -2071,7 +2029,10 @@ def sentence_chrf(
     :return: Chrf score.
     """
     statistics = get_sentence_statistics(
-        hypothesis, reference, order=order, remove_whitespace=remove_whitespace
+        hypothesis,
+        reference,
+        order=order,
+        remove_whitespace=remove_whitespace,
     )
     avg_precision, avg_recall = _avg_precision_and_recall(statistics, order)
     return CHRF(_chrf(avg_precision, avg_recall, beta=beta))
@@ -2096,7 +2057,7 @@ def _available_origlangs(test_sets, langpair):
                     if line.startswith("<doc "):
                         doc_origlang = re.sub(r'.* origlang="([^"]+)".*\n', "\\1", line)
                         origlangs.add(doc_origlang)
-    return sorted(list(origlangs))
+    return sorted(origlangs)
 
 
 def _filter_subset(systems, test_sets, langpair, origlang, subset=None):
@@ -2104,15 +2065,17 @@ def _filter_subset(systems, test_sets, langpair, origlang, subset=None):
     if origlang is None and subset is None:
         return systems
     if test_sets is None or langpair is None:
+        msg = "Filtering for --origlang or --subset needs a test (-t) and a language pair (-l)."
         raise ValueError(
-            "Filtering for --origlang or --subset needs a test (-t) and a language pair (-l)."
+            msg,
         )
 
     indices_to_keep = []
     for test_set in test_sets.split(","):
         rawfile = os.path.join(SACREBLEU_DIR, test_set, "raw", DATASETS[test_set][langpair][0])
         if not rawfile.endswith(".sgm"):
-            raise Exception("--origlang and --subset supports only *.sgm files, not %s", rawfile)
+            msg = "--origlang and --subset supports only *.sgm files, not %s"
+            raise Exception(msg, rawfile)
         if subset is not None:
             if test_set not in SUBSETS:
                 raise Exception("No subset annotation available for test set " + test_set)
@@ -2137,10 +2100,13 @@ def _filter_subset(systems, test_sets, langpair, origlang, subset=None):
                 if line.startswith("<seg "):
                     indices_to_keep.append(include_doc)
                     number_sentences_included += 1 if include_doc else 0
-    return [[sentence for sentence, keep in zip(sys, indices_to_keep) if keep] for sys in systems]
+    return [
+        [sentence for sentence, keep in zip(sys, indices_to_keep, strict=False) if keep]
+        for sys in systems
+    ]
 
 
-def main():
+def main() -> None:
     arg_parser = argparse.ArgumentParser(
         description="sacreBLEU: Hassle-free computation of shareable BLEU scores.\n"
         "Quick usage: score your detokenized output against WMT'14 EN-DE:\n"
@@ -2209,7 +2175,10 @@ def main():
         help="use a subset of sentences whose document annotation matches a give regex (see SUBSETS in the source code)",
     )
     arg_parser.add_argument(
-        "--download", type=str, default=None, help="download a test set and quit"
+        "--download",
+        type=str,
+        default=None,
+        help="download a test set and quit",
     )
     arg_parser.add_argument(
         "--echo",
@@ -2359,10 +2328,10 @@ def main():
 
     if args.num_refs != 1 and (args.test_set is not None or len(args.refs) > 1):
         logging.error(
-            "The --num-refs argument allows you to provide any number of tab-delimited references in a single file."
+            "The --num-refs argument allows you to provide any number of tab-delimited references in a single file.",
         )
         logging.error(
-            "You can only use it with externaly-provided references, however (i.e., not with `-t`),"
+            "You can only use it with externaly-provided references, however (i.e., not with `-t`),",
         )
         logging.error("and you cannot then provide multiple reference files.")
         sys.exit(1)
@@ -2380,7 +2349,7 @@ def main():
             sys.exit(1)
     elif len(args.refs) > 0:
         logging.error(
-            "I need exactly one of (a) a predefined test set (-t) or (b) a list of references"
+            "I need exactly one of (a) a predefined test set (-t) or (b) a list of references",
         )
         sys.exit(1)
     elif args.langpair is None:
@@ -2393,7 +2362,7 @@ def main():
                 logging.error(
                     'Available language pairs for test set "%s": %s',
                     test_set,
-                    ", ".join(x for x in DATASETS[test_set].keys() if "-" in x),
+                    ", ".join(x for x in DATASETS[test_set] if "-" in x),
                 )
                 sys.exit(1)
 
@@ -2408,7 +2377,7 @@ def main():
     if args.test_set is not None and args.tokenize == "none":
         logging.warning(
             "You are turning off sacrebleu's internal tokenization ('--tokenize none'), presumably to supply\n"
-            "your own reference tokenization. Published numbers will not be comparable with other papers.\n"
+            "your own reference tokenization. Published numbers will not be comparable with other papers.\n",
         )
 
     # Internal tokenizer settings. Set to 'zh' for Chinese  DEFAULT_TOKENIZER (
@@ -2455,7 +2424,7 @@ def main():
                     splits = line.rstrip().split(sep="\t", maxsplit=args.num_refs - 1)
                     if len(splits) != args.num_refs:
                         logging.error(
-                            f"FATAL: line {lineno}: expected {args.num_refs} fields, but found {len(splits)}."
+                            f"FATAL: line {lineno}: expected {args.num_refs} fields, but found {len(splits)}.",
                         )
                         sys.exit(17)
                         for refno, split in enumerate(splits):
@@ -2472,17 +2441,17 @@ def main():
         args.subset,
     )
     if len(system) == 0:
-        message = "Test set %s contains no sentence" % args.test_set
+        message = f"Test set {args.test_set} contains no sentence"
         if args.origlang is not None or args.subset is not None:
             message += " with"
             message += "" if args.origlang is None else " origlang=" + args.origlang
             message += "" if args.subset is None else " subset=" + args.subset
         logging.error(message)
-        exit(1)
+        sys.exit(1)
 
     # Handle sentence level and quit
     if args.sentence_level:
-        for output, *references in zip(system, *refs):
+        for output, *references in zip(system, *refs, strict=False):
             results = []
             for metric in args.metrics:
                 if metric == "bleu":
@@ -2532,9 +2501,9 @@ def main():
                 )
                 results.append(chrf)
     except EOFError:
-        logging.error("The input and reference stream(s) were of different lengths.")
+        logging.exception("The input and reference stream(s) were of different lengths.")
         if args.test_set is not None:
-            logging.error(
+            logging.exception(
                 "\nThis could be a problem with your system output or with sacreBLEU's reference database.\n"
                 "If the latter, you can clean out the references cache by typing:\n"
                 "\n"
@@ -2551,9 +2520,7 @@ def main():
     if args.detail:
         width = args.width
         sents_digits = len(str(len(full_system)))
-        origlangs = (
-            args.origlang if args.origlang else _available_origlangs(args.test_set, args.langpair)
-        )
+        origlangs = args.origlang or _available_origlangs(args.test_set, args.langpair)
         for origlang in origlangs:
             subsets = [None]
             if args.subset is not None:
@@ -2595,7 +2562,7 @@ def main():
                             bleu.score,
                             width + 4,
                             width,
-                        )
+                        ),
                     )
                 if "chrf" in args.metrics:
                     chrf = corpus_chrf(
@@ -2614,17 +2581,16 @@ def main():
                             chrf.score,
                             width + 4,
                             width,
-                        )
+                        ),
                     )
 
 
-def display_metric(metrics_to_print, results, num_refs, args):
-    """
-    Badly in need of refactoring.
+def display_metric(metrics_to_print, results, num_refs, args) -> None:
+    """Badly in need of refactoring.
     One idea is to put all of this in the BLEU and CHRF classes, and then define
     a Result::signature() function.
     """
-    for metric, result in zip(metrics_to_print, results):
+    for metric, result in zip(metrics_to_print, results, strict=False):
         if metric == "bleu":
             if args.score_only:
                 print("{0:.{1}f}".format(result.score, args.width))
@@ -2639,15 +2605,18 @@ def display_metric(metrics_to_print, results, num_refs, args):
                 version_str = chrf_signature(args, num_refs)
                 print(
                     "chrF{0:d}+{1} = {2:.{3}f}".format(
-                        args.chrf_beta, version_str, result.score, args.width
-                    )
+                        args.chrf_beta,
+                        version_str,
+                        result.score,
+                        args.width,
+                    ),
                 )
 
 
 def wer_list(references, hypotheses):
     total_error = total_del = total_ins = total_sub = total_ref_len = 0
 
-    for r, h in zip(references, hypotheses):
+    for r, h in zip(references, hypotheses, strict=False):
         res = wer_single(r=r, h=h)
         total_error += res["num_err"]
         total_del += res["num_del"]
@@ -2694,13 +2663,14 @@ def wer_single(r, h):
 
 
 def edit_distance(r, h):
-    """
-    Original Code from https://github.com/zszyellow/WER-in-python/blob/master/wer.py
+    """Original Code from https://github.com/zszyellow/WER-in-python/blob/master/wer.py
     This function is to calculate the edit distance of reference sentence and the hypothesis sentence.
     Main algorithm used is dynamic programming.
+
     Attributes:
         r -> the list of words produced by splitting reference sentence.
         h -> the list of words produced by splitting hypothesis sentence.
+
     """
     d = np.zeros((len(r) + 1) * (len(h) + 1), dtype=np.uint8).reshape((len(r) + 1, len(h) + 1))
     for i in range(len(r) + 1):
@@ -2723,13 +2693,14 @@ def edit_distance(r, h):
 
 
 def get_alignment(r, h, d):
-    """
-    Original Code from https://github.com/zszyellow/WER-in-python/blob/master/wer.py
+    """Original Code from https://github.com/zszyellow/WER-in-python/blob/master/wer.py
     This function is to get the list of steps in the process of dynamic programming.
+
     Attributes:
         r -> the list of words produced by splitting reference sentence.
         h -> the list of words produced by splitting hypothesis sentence.
         d -> the matrix built when calculating the editing distance of h and r.
+
     """
     x = len(r)
     y = len(h)
@@ -2743,7 +2714,7 @@ def get_alignment(r, h, d):
     while True:
         if (x <= 0 and y <= 0) or (len(alignlist) > max_len):
             break
-        elif x >= 1 and y >= 1 and d[x][y] == d[x - 1][y - 1] and r[x - 1] == h[y - 1]:
+        if x >= 1 and y >= 1 and d[x][y] == d[x - 1][y - 1] and r[x - 1] == h[y - 1]:
             align_hyp = " " + h[y - 1] + align_hyp
             align_ref = " " + r[x - 1] + align_ref
             alignment = " " * (len(r[x - 1]) + 1) + alignment

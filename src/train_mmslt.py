@@ -1,48 +1,33 @@
-# *torch
 import argparse
 import datetime
 import json
-import math
-
-# *basic
 import os
 import random
-import sys
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
 
-try:
-    import psutil
-except ImportError:
-    psutil = None
-
 import hpargparse
 import numpy as np
-
-# from sched import scheduler
 import torch
 import wandb
 import yaml
 from hpman.m import _
 from loguru import logger
 from sacrebleu.metrics import BLEU
+from timm.optim import create_optimizer
 from torch import nn
 from torch.backends import cudnn
 from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
-
-# *transformers
 from transformers import (
     MBart50TokenizerFast,
 )
 
 import utils
 from datasets import S2T_Dataset
-
-# *metric
-# *user-defined
+from definition import *
 from models import MMSLT
 
 try:
@@ -50,11 +35,10 @@ try:
 except:
     print("Please install nlgeval package.")
 
-# *timm
-# global definition
-from timm.optim import create_optimizer
-
-from definition import *
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 
 def get_args_parser():
@@ -270,7 +254,6 @@ def get_args_parser():
 
 
 def main(args, config) -> None:
-    # torch.multiprocessing.set_start_method('spawn')
     args.distributed = False
     print(args)
 
@@ -281,7 +264,7 @@ def main(args, config) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    cudnn.benchmark = False
+    cudnn.benchmark = True
 
     print("Creating dataset:")
     tokenizer = MBart50TokenizerFast.from_pretrained(
@@ -631,10 +614,6 @@ def train_one_epoch(
         optimizer.step()
 
         loss_value = ce_loss.item()
-
-        if not math.isfinite(loss_value):
-            print(f"Loss is {loss_value}, stopping training")
-            sys.exit(1)
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])

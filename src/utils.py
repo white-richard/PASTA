@@ -19,7 +19,6 @@ from itertools import groupby
 
 import matplotlib.pyplot as plt  # For graphics
 import seaborn as sns
-import tensorflow as tf
 
 # global definition
 from definition import *
@@ -470,6 +469,8 @@ def GlossPadding(input_ids, gt_gloss, attention_mask):
 
 
 def ctc_decode(gloss_probabilities, sgn_lengths):
+    import tensorflow as tf  # lazy import — only needed for CTC decoding
+
     gloss_probabilities = gloss_probabilities.cpu().detach().numpy()
     # tf_gloss_probabilities = np.concatenate(
     #     (gloss_probabilities[:, :, 1:], gloss_probabilities[:, :, 0, None]),

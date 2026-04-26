@@ -1,120 +1,153 @@
 import argparse
-import os
+import pathlib
 import signal
 import sys
 from collections import defaultdict
 
 import torch
-import torch.distributed as dist
 from PIL import Image
-from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from datasets import MissDataset, VideoDataset
-from llavaov import LLaVA
+
+torch.benchmark = True
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+torch.backends.cuda.enable_math_sdp(True)
+torch.set_float32_matmul_precision("medium")
 
 
-def setup(rank, world_size) -> None:
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+def _checkpoint(
+    frame_data: dict,
+    frame_paths: dict,
+    save_file: str,
+    extract_hidden_states: bool,
+) -> None:
+    if extract_hidden_states:
+        feature_dict = {}
+        for vid in frame_data:
+            sorted_idx = sorted(frame_data[vid])
+            samples = [frame_data[vid][i] for i in sorted_idx]
+            first = samples[0]
+            if isinstance(first, dict):
+                # multi-layer dict format: {"layers": {idx: tensor}, "text": str}
+                layer_indices = list(first["layers"].keys())
+                vid_dict: dict = {
+                    "layers": {
+                        layer_idx: [s["layers"][layer_idx] for s in samples]
+                        for layer_idx in layer_indices
+                    },
+                    "paths": [frame_paths[vid][i] for i in sorted_idx],
+                }
+                if "text" in first:
+                    vid_dict["texts"] = [s["text"] for s in samples]
+            else:
+                # tuple format (mid_tensor, last_tensor) for LLaVA.
+                vid_dict = {
+                    "features": [s[0] for s in samples],
+                    "features_last": [s[1] for s in samples],
+                    "paths": [frame_paths[vid][i] for i in sorted_idx],
+                }
+            feature_dict[vid] = vid_dict
+    else:
+        feature_dict = {
+            vid: {
+                "texts": [frame_data[vid][i] for i in sorted(frame_data[vid])],
+                "paths": [frame_paths[vid][i] for i in sorted(frame_paths[vid])],
+            }
+            for vid in frame_data
+        }
+    torch.save(feature_dict, save_file)
 
 
 def create_feature(args) -> None:
-    rank = int(os.environ["RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-    setup(rank, world_size)
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    batch_size = args.video_bs
-    frame_batch = args.frame_bs
+    chunk_size = args.chunk_size
+    video_bs = args.video_bs
     resume = args.resume
     split = args.split
     save_path = args.save_path
+    extract_hidden_states = args.extract_hidden_states
+    hidden_state_layers = args.hidden_state_layers
+    save_text = args.save_text
+    debug = args.debug
 
-    if resume:
-        dataset = MissDataset(vars(args), split)
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            # shuffle=True,
-            sampler=sampler,
-            drop_last=False,
-            num_workers=16,
-        )
-
+    if extract_hidden_states:
+        layers_str = "_".join(str(l) for l in hidden_state_layers)
+        suffix = f"hidden_layers{layers_str}" + ("_text" if save_text else "")
     else:
-        dataset = VideoDataset(vars(args), split)
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        suffix = "SLdescript"
+    save_file = save_path / f"phoenix_{suffix}_{split}.pt"
 
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            # shuffle=True,
-            sampler=sampler,
-            drop_last=False,
-            num_workers=16,
+    if debug:
+        video_bs = 1
+
+    dataset = MissDataset(vars(args), split) if resume else VideoDataset(vars(args), split)
+
+    print("Collecting frame paths...")
+    all_entries = []
+    for i in range(len(dataset)):
+        vid_name, frame_files = dataset[i]
+        for frame_idx, frame_path in enumerate(frame_files):
+            all_entries.append((vid_name, frame_idx, frame_path))
+
+    print(f"Total frames to process: {len(all_entries)}")
+
+    _FAMILY_DEFAULT_ID = {
+        "llava": "llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        "gemma4": "google/gemma-4-4b-it",
+    }
+    model_id = args.model_id or _FAMILY_DEFAULT_ID[args.model_family]
+
+    if args.model_family == "llava":
+        from llavaov import LLaVA
+
+        mmlm = LLaVA(
+            model_id=model_id,
+            extract_hidden_states=extract_hidden_states,
+            hidden_state_layer=hidden_state_layers[0],
         )
+    else:  # gemma4
+        from gemma4 import Gemma4
 
-    mmlm = LLaVA()
-    text_dict = defaultdict(dict)
-    cnt = 0
+        mmlm = Gemma4(
+            model_id=model_id,
+            hf_model_id=args.hf_model_id or model_id,
+            extract_hidden_states=extract_hidden_states,
+            hidden_state_layers=hidden_state_layers,
+            save_text=save_text,
+        )
+    frame_data: dict[str, dict[int, str | torch.Tensor]] = defaultdict(dict)
+    frame_paths: dict[str, dict[int, str]] = defaultdict(dict)
 
-    for batch in tqdm(dataloader):
-        # vid_name, images, image_sizes = batch
-        vid_name, image_paths = batch
-        images = [
-            Image.open(f[0]).convert("RGB") for f in image_paths
-        ]  # with CSL-Daily, add .resize((256,256))
-        vid_name = vid_name[0]
-        idx = [0]
-        for i in range(0, len(images), frame_batch):
-            slice = min(i + frame_batch, len(images))
-            idx.append(slice)
+    n_batches = -(-len(all_entries) // video_bs)  # ceil div
+    for batch_num, start in enumerate(
+        tqdm(range(0, len(all_entries), video_bs), total=n_batches, desc="Processing batches"),
+    ):
+        batch = all_entries[start : start + video_bs]
+        images = [Image.open(path).convert("RGB") for _, _, path in batch]
 
-        vid_texts = []
-        # vid_lengths = []
-        for i in range(len(idx) - 1):
-            start, end = idx[i : i + 2]
-            frames = images[start:end]
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            outputs = mmlm(images=images)
 
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                texts = mmlm(images=frames)
-            vid_texts.extend(texts)
-            # vid_lengths.extend(lengths)
+        for (vid_name, frame_idx, frame_path), output in zip(batch, outputs, strict=False):
+            frame_data[vid_name][frame_idx] = output
+            frame_paths[vid_name][frame_idx] = str(frame_path)
 
-        text_dict[vid_name]["texts"] = vid_texts
-        # text_dict[vid_name]['text_lengths'] = vid_lengths
+        frames_done = start + len(batch)
+        if frames_done % chunk_size < video_bs:
+            _checkpoint(frame_data, frame_paths, save_file, extract_hidden_states)
+            print(f"Checkpoint saved at frame {frames_done}.")
 
-        cnt += 1
+        if debug and batch_num >= 1:
+            break
 
-        if cnt % 100 == 0:  # save codebook in every 100 iteration (backup)
-            if resume:
-                torch.save(
-                    text_dict,
-                    f"{save_path}phoenix_SLdescript.{split}_{rank}",
-                )  # train, dev, test
-            else:
-                torch.save(
-                    text_dict,
-                    f"{save_path}phoenix_SLdescript.{split}_{rank}",
-                )  # train, dev, test
-
-            print(f"Saving features in {cnt} iteraion..")
-
-    if resume:
-        torch.save(text_dict, f"{save_path}phoenix_SLdescript.{split}_{rank}")
-    else:
-        torch.save(text_dict, f"{save_path}phoenix_SLdescript.{split}_{rank}")
-
+    _checkpoint(frame_data, frame_paths, save_file, extract_hidden_states)
     print("Saving features complete!")
 
 
 def cleanup() -> None:
-    # Any cleanup code, e.g., free up CUDA memory
     torch.cuda.empty_cache()
     sys.exit(0)
 
@@ -128,31 +161,68 @@ signal.signal(signal.SIGINT, signal_handler)
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--ngpus', type=int, default=1, help='number of gpus used')
-    # parser.add_argument('--local_rank', type=int, default=0, help='rank of the current process')
     parser.add_argument(
         "--img_path",
         type=str,
-        default="path/to/datasets/",  # train, dev, test
-        help="path to dataset folder",
+        default="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/",
     )
-    parser.add_argument("--split", type=str, default="train", help="split")
+    parser.add_argument("--split", type=str, default="train")
     parser.add_argument(
-        "--frame_bs",
-        type=int,
-        default=8,
-        help="batch size of frames for LLaVA input",
+        "--model_family",
+        choices=["llava", "gemma4"],
+        default="llava",
+        help=(
+            "MLLM backbone for frame description / hidden-state extraction. "
+            "'llava' (default): LLaVA-OneVision. 'gemma4': Gemma 4."
+        ),
     )
-    parser.add_argument("--video_bs", type=int, default=1)
-    parser.add_argument("--resume", type=bool, default=False, help="resume generating features")
     parser.add_argument(
-        "--save_path",
+        "--model_id",
         type=str,
-        default="path/to/save/",
-        help="path to save features",
+        default="",
+        help=(
+            "HuggingFace model ID. Defaults to "
+            "'llava-hf/llava-onevision-qwen2-7b-ov-hf' for llava and "
+            "'google/gemma-4-E2B-it' for gemma4."
+        ),
+    )
+    parser.add_argument(
+        "--hf-model-id",
+        type=str,
+        default="",
+        help=(
+            "HuggingFace model ID for hidden-state extraction (gemma4 only). "
+            "Must be a standard HF repo (not GGUF) loadable by transformers. "
+            "Defaults to --model_id. Example: 'google/gemma-4-E2B-it'."
+        ),
+    )
+    parser.add_argument("--chunk-size", type=int, default=2000)
+    parser.add_argument("--video_bs", type=int, default=1)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--save_path", type=str, default="out/text_descript")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--extract-hidden-states",
+        action="store_true",
+        help="extract mean-pooled LLM hidden states instead of (or alongside) generating text",
+    )
+    parser.add_argument(
+        "--hidden-state-layers",
+        type=int,
+        nargs="+",
+        default=[20],
+        help="which LLM layers to extract from; accepts multiple values (e.g. --hidden-state-layers 10 20 27)",
+    )
+    parser.add_argument(
+        "--save-text",
+        action="store_true",
+        help="when extracting hidden states, also save the text descriptions (gemma4 only)",
     )
     args = parser.parse_args()
 
+    args.save_path = pathlib.Path(args.save_path)
+    args.save_path.mkdir(parents=True, exist_ok=True)
+    print(f"Features will be saved to: {args.save_path}")
     create_feature(args)
 
 

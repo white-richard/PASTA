@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asl-llm"
+version = "0.1.0"
+requires-python = "==3.12.3"
+dependencies = [
+    "vidaug @ git+https://github.com/okankop/vidaug@1c1ddf2640fe4a9171267d64ae5e3bd70c24d54a",
+    "openai-clip",
+    "vllm",
+    "flamingo-pytorch",
+    "tqdm",
+    "pillow",
+    "numpy",
+    "opencv-python-headless",
+    "scikit-image",
+    "accelerate",
+    "dvc",
+    "dvc_ssh",
+    "bitsandbytes>=0.46.1",
+    "wandb",
+    "hpargparse",
+    "peft",
+    "timm",
+    "matplotlib",
+    "seaborn",
+    "python-lsp-server",
+    "turboquant-vllm[vllm]",
+    "transformers @ git+https://github.com/huggingface/transformers.git"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" }
+nlg-eval = { url = "file:///src/nlg-eval-temp" }
+

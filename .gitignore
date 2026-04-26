@@ -11,13 +11,12 @@ log/
 *.zip
 uv.lock
 .claude
-datasets/
+datasets
 .zed
 out/
 pretrain_models/
 nlg-eval-temp/
 CLAUDE.md
-setup.fish
 tmp
 
 # Byte-compiled / optimized / DLL files
