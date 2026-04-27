@@ -316,7 +316,7 @@ class GMMLPImageEncoder(nn.Module):
         self.perceiver = PerceiverResampler(
             dim=vit_hidden,
             depth=2,
-            dim_head=64+1,
+            dim_head=64 + 1,
             heads=8,
             num_latents=num_latents,
             num_media_embeds=num_media_embeds,
@@ -328,7 +328,9 @@ class GMMLPImageEncoder(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, vit_hidden))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
         self.cls_attn = nn.MultiheadAttention(
-            embed_dim=vit_hidden, num_heads=8, batch_first=True
+            embed_dim=vit_hidden,
+            num_heads=8,
+            batch_first=True,
         )
 
         if align_dim is not None and align_dim != vit_hidden:
