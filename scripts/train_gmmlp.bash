@@ -39,7 +39,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --vision_chunk_size 8 \
   --grad_chunk_size 32 \
   --temperature 0.07 \
-  --lambda_ground 0.0 \
+  --lambda_ground 0.3 \
   --ground_loss_type mse \
   --siglip_feat_train "${SIGLIP_TRAIN}" \
   --siglip_feat_dev   "${SIGLIP_DEV}" \
