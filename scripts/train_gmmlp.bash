@@ -35,6 +35,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --lora_alpha 32 \
   --num_latents 64 \
   --num_media_embeds 512 \
+  --no-lr-scheduler \
   --vision_chunk_size 8 \
   --grad_chunk_size 32 \
   --temperature 0.07 \

@@ -514,6 +514,18 @@ def get_args_parser():
 
     # LR schedule
     parser.add_argument("--sched", default="cosine", type=str, metavar="SCHEDULER")
+    parser.add_argument(
+        "--use-lr-scheduler",
+        action="store_true",
+        help="Enable learning-rate scheduler.",
+    )
+    parser.add_argument(
+        "--no-lr-scheduler",
+        action="store_false",
+        dest="use_lr_scheduler",
+        help="Disable learning-rate scheduler.",
+    )
+    parser.set_defaults(use_lr_scheduler=True)
     parser.add_argument("--lr", type=float, default=1e-4, metavar="LR")
     parser.add_argument("--lr-noise", type=float, nargs="+", default=None)
     parser.add_argument("--lr-noise-pct", type=float, default=0.67)
@@ -935,7 +947,9 @@ def main(args, config) -> None:
     print(f"Trainable parameters: {n_params:.1f}M")
 
     optimizer = create_optimizer(args, model)
-    lr_scheduler, _ = create_scheduler(args, optimizer)
+    lr_scheduler = None
+    if args.use_lr_scheduler:
+        lr_scheduler, _ = create_scheduler(args, optimizer)
 
     output_dir = Path(args.output_dir)
 
@@ -944,7 +958,12 @@ def main(args, config) -> None:
         model.load_state_dict(ckpt["model"], strict=True)
         if not args.eval and "optimizer" in ckpt and "epoch" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
-            lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+            if (
+                lr_scheduler is not None
+                and "lr_scheduler" in ckpt
+                and ckpt["lr_scheduler"] is not None
+            ):
+                lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
             args.start_epoch = ckpt["epoch"] + 1
 
     if args.eval:
@@ -975,16 +994,19 @@ def main(args, config) -> None:
         train_stats = train_one_epoch(args, model, train_loader, optimizer, device, epoch)
         del train_loader
         log_memory(args, f"epoch_{epoch}_after_train")
-        lr_scheduler.step(epoch)
+        if lr_scheduler is not None:
+            lr_scheduler.step(epoch)
 
         if args.output_dir:
+            checkpoint = {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+            }
+            if lr_scheduler is not None:
+                checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
             utils.save_on_master(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "lr_scheduler": lr_scheduler.state_dict(),
-                    "epoch": epoch,
-                },
+                checkpoint,
                 output_dir / "checkpoint.pth",
             )
 
@@ -993,15 +1015,41 @@ def main(args, config) -> None:
         if min_loss > dev_stats["loss"]:
             min_loss = dev_stats["loss"]
             if args.output_dir:
+                checkpoint = {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "train_stats": train_stats,
+                    "dev_stats": dev_stats,
+                    "min_loss": min_loss,
+                    "n_parameters": n_params,
+                    "lr": optimizer.param_groups[0]["lr"],
+                }
+                if lr_scheduler is not None:
+                    checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
                 utils.save_on_master(
-                    {
-                        "model": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "epoch": epoch,
-                    },
+                    checkpoint,
                     output_dir / "best_checkpoint.pth",
                 )
+
+        if args.output_dir:
+            checkpoint = {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+                "train_stats": train_stats,
+                "dev_stats": dev_stats,
+                "min_loss": min_loss,
+                "n_parameters": n_params,
+                "lr": optimizer.param_groups[0]["lr"],
+            }
+            if lr_scheduler is not None:
+                checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
+            loss_tag = f"{dev_stats['loss']:.4f}".replace(".", "p")
+            utils.save_on_master(
+                checkpoint,
+                output_dir / f"checkpoint_epoch_{epoch}_devloss_{loss_tag}.pth",
+            )
 
         print(f"* DEV loss {dev_stats['loss']:.4f}  (best {min_loss:.4f})")
         if utils.is_main_process():
