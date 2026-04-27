@@ -545,6 +545,7 @@ def get_args_parser():
     parser.add_argument("--resume", default="")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N")
     parser.add_argument("--eval", action="store_true")
+    parser.add_argument("--skip-validation", action="store_true", help="Skip the validation loop.")
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument("--eval_num_workers", default=2, type=int)
     parser.add_argument("--prefetch_factor", default=1, type=int)
@@ -1010,9 +1011,11 @@ def main(args, config) -> None:
                 output_dir / "checkpoint.pth",
             )
 
-        dev_stats = evaluate(args, dev_loader, model, epoch, device)
+        dev_stats = None
+        if not args.skip_validation:
+            dev_stats = evaluate(args, dev_loader, model, epoch, device)
 
-        if min_loss > dev_stats["loss"]:
+        if dev_stats is not None and min_loss > dev_stats["loss"]:
             min_loss = dev_stats["loss"]
             if args.output_dir:
                 checkpoint = {
@@ -1032,7 +1035,7 @@ def main(args, config) -> None:
                     output_dir / "best_checkpoint.pth",
                 )
 
-        if args.output_dir:
+        if dev_stats is not None and args.output_dir:
             checkpoint = {
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -1051,27 +1054,33 @@ def main(args, config) -> None:
                 output_dir / f"checkpoint_epoch_{epoch}_devloss_{loss_tag}.pth",
             )
 
-        print(f"* DEV loss {dev_stats['loss']:.4f}  (best {min_loss:.4f})")
+        if dev_stats is not None:
+            print(f"* DEV loss {dev_stats['loss']:.4f}  (best {min_loss:.4f})")
         if utils.is_main_process():
-            wandb.log(
-                {
-                    "epoch": epoch + 1,
-                    "training/train_loss": train_stats["loss"],
-                    "training/align_loss": train_stats.get("align_loss", 0),
-                    "training/ground_loss": train_stats.get("ground_loss", 0),
-                    "dev/dev_loss": dev_stats["loss"],
-                    "dev/align_loss": dev_stats.get("align_loss", 0),
-                    "dev/ground_loss": dev_stats.get("ground_loss", 0),
-                    "dev/min_loss": min_loss,
-                },
-            )
+            log_payload = {
+                "epoch": epoch + 1,
+                "training/train_loss": train_stats["loss"],
+                "training/align_loss": train_stats.get("align_loss", 0),
+                "training/ground_loss": train_stats.get("ground_loss", 0),
+            }
+            if dev_stats is not None:
+                log_payload.update(
+                    {
+                        "dev/dev_loss": dev_stats["loss"],
+                        "dev/align_loss": dev_stats.get("align_loss", 0),
+                        "dev/ground_loss": dev_stats.get("ground_loss", 0),
+                        "dev/min_loss": min_loss,
+                    },
+                )
+            wandb.log(log_payload)
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
-            **{f"dev_{k}": v for k, v in dev_stats.items()},
             "epoch": epoch,
             "n_parameters": n_params,
         }
+        if dev_stats is not None:
+            log_stats.update({f"dev_{k}": v for k, v in dev_stats.items()})
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
@@ -1079,7 +1088,7 @@ def main(args, config) -> None:
         log_memory(args, f"epoch_{epoch}_end")
 
     # Final eval on best checkpoint
-    if args.output_dir:
+    if args.output_dir and not args.skip_validation:
         ckpt = torch.load(str(output_dir / "best_checkpoint.pth"), map_location="cpu")
         model.load_state_dict(ckpt["model"], strict=True)
         for split, loader in [("dev", dev_loader), ("test", test_loader)]:
