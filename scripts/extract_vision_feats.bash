@@ -8,7 +8,7 @@ source "$(dirname "$0")/slib/monitor_cmd.bash"
 HF_MODEL_ID="google/gemma-4-26B-A4B-it"
 IMG_PATH="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/"
 SAVE_PATH="out/phoenix-vision_feats/A4B_features"
-BATCH_SIZE=64
+BATCH_SIZE=128
 NUM_WORKERS=8
 FEATURE_MODE="all_patches"
 SPLITS=(train dev test)
@@ -38,7 +38,7 @@ for SPLIT in "${SPLITS[@]}"; do
     LABEL="extract_vision_feats_${SPLIT}_shard${k}"
     (
       export CUDA_VISIBLE_DEVICES="${GPU}"
-      monitor_cmd "${LABEL}" "out/gmmlp_features" python src/extract_vision_feats.py \
+      monitor_cmd "${LABEL}" ${SAVE_PATH} python src/extract_vision_feats.py \
         --img_path "${IMG_PATH}" \
         --split "${SPLIT}" \
         --hf-model-id "${HF_MODEL_ID}" \
