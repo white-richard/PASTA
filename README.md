@@ -28,6 +28,18 @@ datasets/text_phoenix-descript
 └── phoenix_SLdescriptions.train
 ```
 
+### Download How2Sign Dataset
+
+https://how2sign.github.io/
+
+train, validation, test from:
+
+Green Screen RGB clips* (frontal view)
+
+English Translation (manually re-aligned)
+
+datasets/how2sign/
+
 ### Patch `nlg-eval`
 
 TODO: is this necessary now that we are using python 3.12?

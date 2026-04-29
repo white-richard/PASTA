@@ -17,6 +17,7 @@ import wandb
 import yaml
 from hpman.m import _
 from loguru import logger
+from rouge_score import rouge_scorer as _rouge_module
 from sacrebleu.metrics import BLEU
 from timm.optim import create_optimizer
 from torch import nn
@@ -355,6 +356,11 @@ def get_args_parser():
         help="Run ViT feature extraction over all splits before training. "
         "Requires --gmmlp_checkpoint and --gmmlp_feat_cache. "
         "Already-cached videos are skipped; training continues afterwards.",
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=25.0,
+        help="Nominal video frame rate used to convert frame counts to seconds for timing metrics.",
     )
 
     return parser
@@ -656,6 +662,7 @@ def main(args, config) -> None:
             SPECIAL_SYMBOLS,
             PAD_IDX,
             device,
+            fps=args.fps,
         )
         print(
             f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} ",
@@ -672,6 +679,7 @@ def main(args, config) -> None:
             SPECIAL_SYMBOLS,
             PAD_IDX,
             device,
+            fps=args.fps,
         )
         print(
             f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
@@ -686,6 +694,11 @@ def main(args, config) -> None:
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in trange(args.start_epoch, args.epochs):
+    train_peak_ram_gb = 0.0
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+
+    for epoch in range(args.start_epoch, args.epochs):
         train_stats = train_one_epoch(
             args,
             model,
@@ -698,6 +711,7 @@ def main(args, config) -> None:
         )
         if lr_scheduler is not None:
             lr_scheduler.step(epoch)
+        train_peak_ram_gb = max(train_peak_ram_gb, train_stats.get("peak_ram_gb", 0.0))
 
         if args.output_dir:
             checkpoint_paths = [
@@ -717,27 +731,23 @@ def main(args, config) -> None:
                     checkpoint_path,
                 )
 
-        run_val = not args.skip_val and (epoch + 1) % args.eval_every == 0
-        if not run_val:
-            print(f"Skipping validation for epoch {epoch}.")
-            test_stats = {"loss": float("nan"), "belu4": float("nan")}
-        else:
-            test_stats = evaluate(
-                args,
-                dev_dataloader,
-                model,
-                model_without_ddp,
-                tokenizer,
-                ce_criterion,
-                config,
-                UNK_IDX,
-                SPECIAL_SYMBOLS,
-                PAD_IDX,
-                device,
-            )
-            print(
-                f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
-            )
+        test_stats = evaluate(
+            args,
+            dev_dataloader,
+            model,
+            model_without_ddp,
+            tokenizer,
+            ce_criterion,
+            config,
+            UNK_IDX,
+            SPECIAL_SYMBOLS,
+            PAD_IDX,
+            device,
+            fps=args.fps,
+        )
+        print(
+            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+        )
 
             if max_accuracy < test_stats["belu4"]:
                 max_accuracy = test_stats["belu4"]
@@ -749,37 +759,37 @@ def main(args, config) -> None:
                             "optimizer": optimizer.state_dict(),
                             "epoch": epoch,
                             "args": args,
-                        }
-                        if lr_scheduler is not None:
-                            state["lr_scheduler"] = lr_scheduler.state_dict()
-                        torch.save(
-                            state,
-                            checkpoint_path,
-                        )
+                            "metrics": {
+                                "bleu1": test_stats.get("bleu1"),
+                                "bleu2": test_stats.get("bleu2"),
+                                "bleu3": test_stats.get("bleu3"),
+                                "bleu4": test_stats.get("bleu4"),
+                                "rouge_l": test_stats.get("rouge_l"),
+                                "dev_loss": test_stats.get("loss"),
+                                "train_loss": train_stats.get("loss"),
+                                "inference_time_per_video_s": test_stats.get("inference_time_per_video_s"),
+                                "inference_rtf": test_stats.get("inference_rtf"),
+                            },
+                        },
+                        checkpoint_path,
+                    )
 
-            print(f"Max BELU-4: {max_accuracy:.2f}%")
-
-        wandb_payload = {
-            "epoch": epoch + 1,
-            "training/train_loss": train_stats["loss"],
-        }
-        if run_val:
-            wandb_payload.update(
-                {
-                    "dev/dev_loss": test_stats["loss"],
-                    "dev/Bleu_4": test_stats["belu4"],
-                    "dev/Best_Bleu_4": max_accuracy,
-                },
-            )
-            if "bleu1" in test_stats:
-                wandb_payload["dev/Bleu_1"] = test_stats["bleu1"]
-            if "bleu2" in test_stats:
-                wandb_payload["dev/Bleu_2"] = test_stats["bleu2"]
-            if "bleu3" in test_stats:
-                wandb_payload["dev/Bleu_3"] = test_stats["bleu3"]
-            if "rouge_l" in test_stats:
-                wandb_payload["dev/Rouge_L"] = test_stats["rouge_l"]
-        wandb.log(wandb_payload)
+        print(f"Max BELU-4: {max_accuracy:.2f}%")
+        wandb.log(
+            {
+                "epoch": epoch + 1,
+                "training/train_loss": train_stats["loss"],
+                "dev/dev_loss": test_stats["loss"],
+                "dev/Bleu_1": test_stats.get("bleu1", 0.0),
+                "dev/Bleu_2": test_stats.get("bleu2", 0.0),
+                "dev/Bleu_3": test_stats.get("bleu3", 0.0),
+                "dev/Bleu_4": test_stats["belu4"],
+                "dev/Best_Bleu_4": max_accuracy,
+                "dev/ROUGE_L": test_stats.get("rouge_l", 0.0),
+                "dev/inference_time_per_video_s": test_stats.get("inference_time_per_video_s", 0.0),
+                "dev/inference_rtf": test_stats.get("inference_rtf", 0.0),
+            },
+        )
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
@@ -793,7 +803,19 @@ def main(args, config) -> None:
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-    # Last epoch
+    total_time = time.time() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    print(f"Training time {total_time_str}")
+
+    train_peak_vram_gb = (
+        torch.cuda.max_memory_allocated(device) / (1024**3) if torch.cuda.is_available() else 0.0
+    )
+    print(
+        f"[memory/training] peak RAM: {train_peak_ram_gb:.2f} GB  "
+        f"peak VRAM: {train_peak_vram_gb:.2f} GB"
+    )
+
+    # Last epoch: load best checkpoint, evaluate, and run single-video memory benchmark
     test_on_last_epoch = True
     if test_on_last_epoch and args.output_dir and not args.skip_val:
         test_model_path = output_dir / "best_checkpoint.pth"
@@ -815,6 +837,7 @@ def main(args, config) -> None:
             SPECIAL_SYMBOLS,
             PAD_IDX,
             device,
+            fps=args.fps,
         )
         print(
             f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
@@ -832,14 +855,62 @@ def main(args, config) -> None:
             SPECIAL_SYMBOLS,
             PAD_IDX,
             device,
+            fps=args.fps,
         )
         print(
             f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
         )
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Training time {total_time_str}")
+        # Single-video memory benchmark (same video every run: test_data[0])
+        forced_bos_sv = (
+            None
+            if args.language_decoder == "gemma4"
+            else tokenizer.lang_code_to_id["de_DE"]
+        )
+        sv_src, _ = test_data.collate_fn([test_data[0]])
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device)
+        sv_ram_gb = psutil.Process(os.getpid()).memory_info().rss / (1024**3) if psutil else 0.0
+        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            _ = model_without_ddp.generate(
+                sv_src,
+                max_new_tokens=150,
+                num_beams=8,
+                forced_bos_token_id=forced_bos_sv,
+            )
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+        sv_peak_vram_gb = (
+            torch.cuda.max_memory_allocated(device) / (1024**3) if torch.cuda.is_available() else 0.0
+        )
+        print(
+            f"[memory/single-video] RAM at inference: {sv_ram_gb:.2f} GB  "
+            f"peak VRAM: {sv_peak_vram_gb:.2f} GB"
+        )
+
+        # Persist memory stats back into best checkpoint
+        if (output_dir / "best_checkpoint.pth").exists():
+            ckpt = torch.load(output_dir / "best_checkpoint.pth", map_location="cpu", weights_only=False)
+            ckpt.setdefault("metrics", {}).update(
+                {
+                    "total_train_time_s": total_time,
+                    "train_peak_ram_gb": train_peak_ram_gb,
+                    "train_peak_vram_gb": train_peak_vram_gb,
+                    "single_video_ram_gb": sv_ram_gb,
+                    "single_video_peak_vram_gb": sv_peak_vram_gb,
+                }
+            )
+            torch.save(ckpt, output_dir / "best_checkpoint.pth")
+
+        wandb.log(
+            {
+                "memory/train_peak_ram_gb": train_peak_ram_gb,
+                "memory/train_peak_vram_gb": train_peak_vram_gb,
+                "memory/single_video_ram_gb": sv_ram_gb,
+                "memory/single_video_peak_vram_gb": sv_peak_vram_gb,
+                "training/total_time_s": total_time,
+            }
+        )
 
 
 def train_one_epoch(
@@ -860,6 +931,8 @@ def train_one_epoch(
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = f"Epoch: [{epoch}/{args.epochs}]"
     print_freq = 10
+
+    peak_ram_gb = 0.0
 
     for step, (src_input, tgt_input) in enumerate(
         tqdm(
@@ -882,6 +955,9 @@ def train_one_epoch(
 
         loss_value = ce_loss.item()
 
+        if psutil is not None:
+            peak_ram_gb = max(peak_ram_gb, psutil.Process(os.getpid()).memory_info().rss / (1024**3))
+
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_llm=round(float(optimizer.param_groups[1]["lr"]), 8))
@@ -897,7 +973,10 @@ def train_one_epoch(
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    return {
+        **{k: meter.global_avg for k, meter in metric_logger.meters.items()},
+        "peak_ram_gb": peak_ram_gb,
+    }
 
 
 def evaluate(
@@ -912,6 +991,7 @@ def evaluate(
     SPECIAL_SYMBOLS,
     PAD_IDX,
     device,
+    fps: float = 25.0,
 ):
     model.eval()
 
@@ -919,6 +999,15 @@ def evaluate(
     header = "Test:"
     tgt_pres = []
     tgt_refs = []
+
+    total_gen_time = 0.0
+    total_video_frames = 0
+    num_videos = 0
+    forced_bos = (
+        None
+        if args.language_decoder == "gemma4"
+        else tokenizer.lang_code_to_id["de_DE"]
+    )
 
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
@@ -937,18 +1026,23 @@ def evaluate(
                 tgt_loss = criterion(logits, label.to(device))
             metric_logger.update(loss=tgt_loss.item())
 
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            t_gen_start = time.perf_counter()
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                forced_bos = (
-                    None
-                    if args.language_decoder == "gemma4"
-                    else tokenizer.lang_code_to_id["de_DE"]
-                )
                 output = model_without_ddp.generate(
                     src_input,
                     max_new_tokens=args.eval_max_new_tokens,
                     num_beams=args.eval_num_beams,
                     forced_bos_token_id=forced_bos,
                 )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            total_gen_time += time.perf_counter() - t_gen_start
+
+            total_video_frames += src_input["src_length_batch"].sum().item()
+            num_videos += len(src_input["src_length_batch"])
+
             pred_texts = tokenizer.batch_decode(output.detach().cpu(), skip_special_tokens=True)
             ref_texts = tokenizer.batch_decode(tgt_input["input_ids"], skip_special_tokens=True)
             tgt_pres.extend(pred_texts)
@@ -974,9 +1068,30 @@ def evaluate(
                 print("*** DEBUG MODE: stopping after 2 batches ***")
                 break
 
-    bleu = BLEU()
-    bleu_s = bleu.corpus_score(tgt_pres, [tgt_refs]).score
-    metric_logger.meters["belu4"].update(bleu_s)
+    # BLEU 1-4
+    bleu_scores = {}
+    for n in range(1, 5):
+        b = BLEU(max_ngram_order=n)
+        bleu_scores[f"bleu{n}"] = b.corpus_score(tgt_pres, [tgt_refs]).score
+    metric_logger.meters["belu4"].update(bleu_scores["bleu4"])
+
+    # ROUGE-L (corpus-level average of sentence F1, scaled to 0-100)
+    _rouge_scorer = _rouge_module.RougeScorer(["rougeL"], use_stemmer=False)
+    rouge_l = (
+        sum(
+            _rouge_scorer.score(ref, pred)["rougeL"].fmeasure
+            for ref, pred in zip(tgt_refs, tgt_pres)
+        )
+        / len(tgt_pres)
+        * 100
+        if tgt_pres
+        else 0.0
+    )
+
+    # Timing
+    avg_time_per_video = total_gen_time / num_videos if num_videos > 0 else 0.0
+    total_video_secs = total_video_frames / fps
+    inference_rtf = total_gen_time / total_video_secs if total_video_secs > 0 else 0.0
 
     if args.eval_metrics and compute_metrics is not None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1015,20 +1130,35 @@ def evaluate(
             metric_logger.update(rouge_l=rouge_l)
 
     metric_logger.synchronize_between_processes()
-    print(f"* BELU-4 {metric_logger.belu4.global_avg:.3f} loss {metric_logger.loss.global_avg:.3f}")
+    print(
+        f"* BLEU-1/2/3/4: {bleu_scores['bleu1']:.2f}/{bleu_scores['bleu2']:.2f}/"
+        f"{bleu_scores['bleu3']:.2f}/{bleu_scores['bleu4']:.2f}  "
+        f"ROUGE-L: {rouge_l:.2f}  "
+        f"loss: {metric_logger.loss.global_avg:.3f}  "
+        f"gen: {avg_time_per_video:.3f}s/video  rtf: {inference_rtf:.3f}s/s"
+    )
 
-    metrics_parts = []
-    if "bleu1" in metric_logger.meters:
-        metrics_parts.append(f"BLEU-1 {metric_logger.bleu1.global_avg:.3f}")
-    if "bleu2" in metric_logger.meters:
-        metrics_parts.append(f"BLEU-2 {metric_logger.bleu2.global_avg:.3f}")
-    if "bleu3" in metric_logger.meters:
-        metrics_parts.append(f"BLEU-3 {metric_logger.bleu3.global_avg:.3f}")
-    if "rouge_l" in metric_logger.meters:
-        metrics_parts.append(f"ROUGE-L {metric_logger.rouge_l.global_avg:.3f}")
-    if metrics_parts:
-        print("* " + " ".join(metrics_parts))
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    if args.eval:
+        with open(args.output_dir + "/tmp_pres.txt", "w") as f:
+            f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
+        with open(args.output_dir + "/tmp_refs.txt", "w") as f:
+            f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
+        print("\n" + "*" * 80)
+        compute_metrics(
+            hypothesis=args.output_dir + "/tmp_pres.txt",
+            references=[args.output_dir + "/tmp_refs.txt"],
+            no_skipthoughts=True,
+            no_glove=True,
+        )
+        print("*" * 80)
+
+    return {
+        **{k: meter.global_avg for k, meter in metric_logger.meters.items()},
+        **bleu_scores,
+        "rouge_l": rouge_l,
+        "inference_time_per_video_s": avg_time_per_video,
+        "inference_rtf": inference_rtf,
+    }
 
 
 if __name__ == "__main__":
