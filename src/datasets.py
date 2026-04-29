@@ -2,6 +2,7 @@ import gzip
 import os
 import pickle
 import random
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -189,7 +190,7 @@ def load_dataset_file(filename):
 
 
 class S2T_Dataset(Dataset):
-    def __init__(self, path, tokenizer, config, args, phase) -> None:
+    def __init__(self, path, tokenizer, config, args, phase, use_gmmlp_backbone=False, gmmlp_feat_cache=None) -> None:
         self.config = config
         self.args = args
 
@@ -203,8 +204,23 @@ class S2T_Dataset(Dataset):
         )
         self.max_length = config["data"]["max_length"]
         self.img_path = config["data"]["img_path"]
+        self.use_gmmlp_backbone = use_gmmlp_backbone
+        self.gmmlp_feat_cache = Path(gmmlp_feat_cache) / phase if gmmlp_feat_cache else None
 
         self.list = [key for key, value in self.raw_data.items()]
+
+        # Pre-load all cached ViT features into RAM so __getitem__ avoids per-sample
+        # file I/O, which otherwise stalls the GPU waiting on the DataLoader.
+        self._gmmlp_feats: dict[str, torch.Tensor] | None = None
+        if use_gmmlp_backbone and self.gmmlp_feat_cache is not None:
+            feats: dict[str, torch.Tensor] = {}
+            for key in self.list:
+                vid_name = key.split("/")[1] if "/" in key else key
+                pt = self.gmmlp_feat_cache / f"{vid_name}.pt"
+                if pt.exists():
+                    feats[vid_name] = torch.load(pt, weights_only=True)
+            self._gmmlp_feats = feats
+            print(f"  [{phase}] pre-loaded {len(feats)}/{len(self.list)} GMMLP feature tensors")
 
         def sometimes(aug):
             return va.Sometimes(
@@ -233,13 +249,61 @@ class S2T_Dataset(Dataset):
         tgt_sample = sample["text"]
         name_sample = sample["name"]
 
-        img_sample, selected_indices = self.load_imgs(
-            [self.img_path + x for x in sample["imgs_path"]]
-        )
+        img_paths = [self.img_path + x for x in sample["imgs_path"]]
+
+        if self.use_gmmlp_backbone:
+            vid_name = key.split("/")[1] if "/" in key else key
+            if self._gmmlp_feats is not None and vid_name in self._gmmlp_feats:
+                # Cache hit: skip frame loading entirely; apply random subsampling to feats
+                vis_feats_full = self._gmmlp_feats[vid_name]  # (T_all, D_vit)
+                n = len(vis_feats_full)
+                if n > self.max_length:
+                    selected_indices = sorted(random.sample(range(n), k=self.max_length))
+                    vis_feats = vis_feats_full[selected_indices]
+                    descript_sample = descript_sample[selected_indices]
+                else:
+                    vis_feats = vis_feats_full
+                return name_sample, descript_sample, tgt_sample, None, None, vis_feats
+            # No cache: fall back to PIL frames
+            img_sample, selected_indices = self.load_imgs(img_paths)
+            if selected_indices is not None:
+                descript_sample = descript_sample[selected_indices]
+            pil_frames = self.load_pil_imgs(img_paths, selected_indices)
+            return name_sample, descript_sample, tgt_sample, img_sample, pil_frames, None
+
+        img_sample, selected_indices = self.load_imgs(img_paths)
         if selected_indices is not None:
             descript_sample = descript_sample[selected_indices]
-
         return name_sample, descript_sample, tgt_sample, img_sample
+
+    def load_all_pil_frames(self, paths: list) -> list:
+        """Load every frame as PIL (no subsampling) for GMMLP feature extraction."""
+        frames = []
+        for p in paths:
+            img = cv2.imread(p)
+            if img is None:
+                img = np.zeros((224, 224, 3), dtype=np.uint8)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            frames.append(Image.fromarray(img))
+        return frames
+
+    def load_pil_imgs(self, paths, selected_indices=None):
+        """Load raw PIL images (no normalization) for GMMLP backbone preprocessing."""
+        if selected_indices is not None:
+            paths = [paths[i] for i in selected_indices]
+        elif len(paths) > self.max_length:
+            selected_indices = sorted(random.sample(range(len(paths)), k=self.max_length))
+            paths = [paths[i] for i in selected_indices]
+        frames = []
+        for p in paths:
+            img = cv2.imread(p)
+            if img is None:
+                img = np.zeros((224, 224, 3), dtype=np.uint8)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            frames.append(Image.fromarray(img))
+        return frames
 
     def load_imgs(self, paths):
 
@@ -287,10 +351,34 @@ class S2T_Dataset(Dataset):
         return imgs, selected_indices
 
     def collate_fn(self, batch):
+        # Fast path: GMMLP + full cache — skip all img/descript tensor work entirely.
+        if self._gmmlp_feats is not None:
+            name_batch, tgt_batch, vis_feats_batch = [], [], []
+            for name_sample, _descript, tgt_sample, _img, _pil, vis_feats in batch:
+                name_batch.append(name_sample)
+                tgt_batch.append(tgt_sample)
+                vis_feats_batch.append(vis_feats)
+            tgt_input = self.tokenizer(
+                text_target=tgt_batch,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+            )
+            return {"vis_feats": vis_feats_batch, "name_batch": name_batch}, tgt_input
 
         tgt_batch, txt_tmp, src_length_batch, name_batch, img_tmp = [], [], [], [], []
+        pil_frames_batch = [] if self.use_gmmlp_backbone else None
+        vis_feats_batch = [] if self.use_gmmlp_backbone else None
 
-        for name_sample, txt_sample, tgt_sample, img_sample in batch:
+        for item in batch:
+            if self.use_gmmlp_backbone:
+                name_sample, txt_sample, tgt_sample, img_sample, pil_frames, vis_feats = item
+                if vis_feats is not None:
+                    vis_feats_batch.append(vis_feats)
+                else:
+                    pil_frames_batch.append(pil_frames)
+            else:
+                name_sample, txt_sample, tgt_sample, img_sample = item
             name_batch.append(name_sample)
 
             txt_tmp.append(txt_sample)
@@ -358,9 +446,12 @@ class S2T_Dataset(Dataset):
         src_input["input_img"] = img_batch
         src_input["attention_mask"] = img_padding_mask
         src_input["name_batch"] = name_batch
-
         src_input["src_length_batch"] = src_length_batch
         src_input["new_src_length_batch"] = new_src_lengths
+        if vis_feats_batch:
+            src_input["vis_feats"] = vis_feats_batch
+        elif pil_frames_batch:
+            src_input["pil_frames"] = pil_frames_batch
 
         return src_input, tgt_input
 

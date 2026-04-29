@@ -29,7 +29,8 @@ dependencies = [
     "seaborn",
     "python-lsp-server",
     "turboquant-vllm[vllm]",
-    "transformers @ git+https://github.com/huggingface/transformers.git"
+    "transformers @ git+https://github.com/huggingface/transformers.git",
+    "textual>=0.80.0",
 ]
 
 [tool.setuptools.packages.find]

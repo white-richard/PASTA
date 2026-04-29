@@ -313,6 +313,9 @@ class GMMLPImageEncoder(nn.Module):
                 if hasattr(ip, attr):
                     setattr(ip, attr, False)
 
+        self.vit_hidden = vit_hidden
+        self.num_latents = num_latents
+
         self.perceiver = PerceiverResampler(
             dim=vit_hidden,
             depth=2,
@@ -360,6 +363,82 @@ class GMMLPImageEncoder(nn.Module):
         # No projector in pre-extracted mode; return zeros for student_vid.
         student_vid = torch.zeros(len(sentence_embs), 1, device=device, dtype=dtype)
         return F.normalize(sentence_emb, dim=-1), student_vid
+
+    def forward_latents(self, src_input: dict) -> torch.Tensor:
+        """Return (B, K, D_vit) Perceiver latents (before CLS pooling).
+
+        Used by downstream translation models (e.g. MMSLT) that need a
+        sequence of latent tokens rather than a single pooled embedding.
+        Supports both PIL image mode (src_input["images"]) and pre-extracted
+        mode (src_input["vis_feats"]).
+        """
+        if "vis_feats" in src_input:
+            return self._forward_latents_preextracted(src_input)
+
+        images_batch = src_input["images"]
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+
+        capped_batch: list[list] = []
+        for vid_frames in images_batch:
+            if len(vid_frames) > self.max_frames_with_grad:
+                step = len(vid_frames) / self.max_frames_with_grad
+                vid_frames = [vid_frames[int(i * step)] for i in range(self.max_frames_with_grad)]
+            capped_batch.append(vid_frames)
+
+        video_lengths = [len(f) for f in capped_batch]
+        flat_frames = [f for frames in capped_batch for f in frames]
+
+        vis_pooled_list: list[torch.Tensor] = []
+        for i in range(0, len(flat_frames), self.vision_chunk_size):
+            chunk = flat_frames[i : i + self.vision_chunk_size]
+            proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
+            if self.gemma4_max_soft_tokens is not None:
+                proc_kwargs["max_soft_tokens"] = self.gemma4_max_soft_tokens
+            inputs = self._image_processor(**proc_kwargs).to(device)
+            pv = inputs["pixel_values"].to(dtype)
+            pos_ids = inputs.get("image_position_ids")
+            vis = self.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
+            if vis.dim() == 2:
+                c = len(chunk)
+                vis = vis.view(c, vis.shape[0] // c, vis.shape[-1])
+            vis_pooled_list.append(vis.mean(dim=1))
+
+        all_vis = torch.cat(vis_pooled_list, dim=0)
+
+        latents_list: list[torch.Tensor] = []
+        start = 0
+        for length in video_lengths:
+            vis_frames = all_vis[start : start + length]
+            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D)
+            pooled = out.mean(dim=1)  # (1, K, D)
+            latents_list.append(pooled)
+            start += length
+
+        return torch.cat(latents_list, dim=0)  # (B, K, D_vit)
+
+    def _forward_latents_preextracted(self, src_input: dict) -> torch.Tensor:
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        feats = src_input["vis_feats"]  # list of (T_i, D_vit) CPU tensors
+        lengths = [len(f) for f in feats]
+        max_T = max(lengths)
+        B = len(feats)
+        D = feats[0].shape[-1]
+
+        # Single padded transfer: (B, max_T, 1, D_vit)
+        padded = torch.zeros(B, max_T, 1, D, dtype=dtype, device=device)
+        for i, (f, t) in enumerate(zip(feats, lengths)):
+            padded[i, :t, 0, :] = f.to(dtype=dtype, non_blocking=True)
+
+        # One Perceiver call for the whole batch: (B, max_T, K, D)
+        out = self.perceiver(padded)
+
+        # Masked mean over T to ignore padding
+        mask = torch.arange(max_T, device=device).unsqueeze(0) < torch.tensor(lengths, device=device).unsqueeze(1)
+        mask = mask[:, :, None, None].to(dtype)  # (B, max_T, 1, 1)
+        pooled = (out * mask).sum(dim=1) / mask.sum(dim=1)  # (B, K, D)
+        return pooled
 
     def forward(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (sentence_emb, student_vid).

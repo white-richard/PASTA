@@ -191,6 +191,7 @@ class MMSLT(nn.Module):
         vision_backbone="resnet18",
         language_decoder="mbart",
         gemma4_model_id="google/gemma-4-E2B-it",
+        gmmlp_encoder=None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -207,7 +208,7 @@ class MMSLT(nn.Module):
             self.gemma4 = Gemma4ForConditionalGeneration.from_pretrained(
                 gemma4_model_id,
                 quantization_config=quant_config,
-                device_map="auto",
+                device_map={"": 0},
                 low_cpu_mem_usage=True,
             )
             self.gemma4.generation_config.max_length = None
@@ -237,25 +238,45 @@ class MMSLT(nn.Module):
             self.mbart.generation_config.max_length = None
             planes_out = planes  # MBart hidden size is 1024
 
-        self.backbone, backbone_dim = build_backbone(vision_backbone)
-        # Description mapper
-        self.descriptproj = Projector(
-            input_dim=backbone_dim,
-            hidden_dim=planes,
-            output_dim=inplanes,
-        )
-        # Modality adapter
-        self.conv = TemporalConv(
-            input_size=backbone_dim + inplanes,
-            hidden_size=planes,
-            conv_type=2,
-        )
-        self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes_out)
-        # Freeze DM
-        for param in self.descriptproj.parameters():
-            param.requires_grad = False
+        if gmmlp_encoder is not None:
+            # Use pretrained GMMLP vision encoder (SigLIP2 ViT + Perceiver) instead of
+            # the standard backbone+descriptproj+conv pipeline. The encoder produces
+            # (B, K, D_vit) Perceiver latents that are projected directly to the LM space.
+            self.gmmlp_encoder = gmmlp_encoder
+            gmmlp_dim = gmmlp_encoder.vit_hidden
+            self.projector = Projector(input_dim=gmmlp_dim, hidden_dim=planes, output_dim=planes_out)
+        else:
+            self.backbone, backbone_dim = build_backbone(vision_backbone)
+            # Description mapper
+            self.descriptproj = Projector(
+                input_dim=backbone_dim,
+                hidden_dim=planes,
+                output_dim=inplanes,
+            )
+            # Modality adapter
+            self.conv = TemporalConv(
+                input_size=backbone_dim + inplanes,
+                hidden_size=planes,
+                conv_type=2,
+            )
+            self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes_out)
+            # Freeze DM
+            for param in self.descriptproj.parameters():
+                param.requires_grad = False
 
     def share_forward(self, src_input):
+        if hasattr(self, "gmmlp_encoder"):
+            # GMMLP path: frames → Perceiver latents (B, K, D_vit) → projector.
+            # Prefers pre-extracted vis_feats (skips ViT); falls back to PIL frames.
+            if "vis_feats" in src_input:
+                enc_input = {"vis_feats": src_input["vis_feats"]}
+            else:
+                enc_input = {"images": src_input["pil_frames"]}
+            latents = self.gmmlp_encoder.forward_latents(enc_input)  # (B, K, D_vit)
+            inputs_embeds = self.projector(latents)  # (B, K, planes_out)
+            B, K, _ = inputs_embeds.shape
+            attention_mask = torch.ones(B, K, dtype=torch.long)
+            return inputs_embeds, attention_mask
 
         img_feature = self.backbone(src_input["input_img"].cuda(), src_input["src_length_batch"])
         descript_feature = self.descriptproj(img_feature)
