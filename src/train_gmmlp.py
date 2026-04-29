@@ -645,18 +645,18 @@ def get_args_parser():
     parser.add_argument("--grounding_hidden_layer", type=int, default=20)
     parser.add_argument(
         "--siglip_feat_train",
-        required=True,
-        help="Path to siglip features .pt file for train split.",
+        default="datasets/phoenix-translations/phoenix_translations_siglip2_train.pt",
+        help="Path to siglip2 text features .pt for train split (default: translation embeddings).",
     )
     parser.add_argument(
         "--siglip_feat_dev",
-        required=True,
-        help="Path to siglip features .pt file for dev split.",
+        default="datasets/phoenix-translations/phoenix_translations_siglip2_dev.pt",
+        help="Path to siglip2 text features .pt for dev split (default: translation embeddings).",
     )
     parser.add_argument(
         "--siglip_feat_test",
-        required=True,
-        help="Path to siglip features .pt file for test split.",
+        default="datasets/phoenix-translations/phoenix_translations_siglip2_test.pt",
+        help="Path to siglip2 text features .pt for test split (default: translation embeddings).",
     )
 
     # Pre-extracted ViT features (from extract_gmmlp_features.py)

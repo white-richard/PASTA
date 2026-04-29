@@ -15,8 +15,9 @@ GROUNDING_LAYER=20
 SIGLIP_TRAIN="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip2_train.pt"
 SIGLIP_DEV="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip2_dev.pt"
 SIGLIP_TEST="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip2_test.pt"
+TRANSLATION_FEAT_PATH="datasets/phoenix-translations"
 # Set to any non-empty value to skip validation (adds --skip-validation).
-SKIP_VALIDATION="1"
+SKIP_VALIDATION=""
 
 GROUNDING_ARGS=()
 if [[ -z "${PREEXTRACTED_DIR}" ]]; then
@@ -46,6 +47,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --siglip_feat_train "${SIGLIP_TRAIN}" \
   --siglip_feat_dev   "${SIGLIP_DEV}" \
   --siglip_feat_test  "${SIGLIP_TEST}" \
+  --translation_feat_path "${TRANSLATION_FEAT_PATH}" \
   --num_workers 4 \
   --eval_num_workers 4 \
   ${SKIP_VALIDATION:+--skip-validation} \
