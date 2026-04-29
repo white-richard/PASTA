@@ -1,8 +1,10 @@
 import argparse
 import datetime
+import gc
 import json
 import os
 import random
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -21,6 +23,7 @@ from torch import nn
 from torch.backends import cudnn
 from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
+from tqdm import tqdm, trange
 from transformers import (
     MBart50TokenizerFast,
 )
@@ -32,8 +35,9 @@ from models import MMSLT
 
 try:
     from nlgeval import compute_metrics
-except:
-    print("Please install nlgeval package.")
+except Exception:
+    compute_metrics = None
+    logger.warning("nlgeval is not installed; extra eval metrics will be skipped.")
 
 try:
     import psutil
@@ -103,6 +107,11 @@ def get_args_parser():
         type=str,
         metavar="SCHEDULER",
         help='LR scheduler (default: "cosine"',
+    )
+    parser.add_argument(
+        "--no-lr-scheduler",
+        action="store_true",
+        help="Disable learning rate scheduler.",
     )
     parser.add_argument(
         "--lr",
@@ -192,6 +201,37 @@ def get_args_parser():
     parser.add_argument("--resume", default="", help="resume from checkpoint")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
+    parser.add_argument(
+        "--eval-metrics",
+        action="store_true",
+        help="Compute extra BLEU-1/2/3 and ROUGE metrics during evaluation.",
+    )
+    parser.add_argument(
+        "--skip_val",
+        action="store_true",
+        help="Skip validation on the dev set during training.",
+    )
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run dev evaluation every N epochs (default: 1).",
+    )
+    parser.add_argument(
+        "--eval-max-new-tokens",
+        type=int,
+        default=80,
+        metavar="N",
+        help="Max tokens to generate during BLEU evaluation (default: 80; Phoenix avg is ~10 words).",
+    )
+    parser.add_argument(
+        "--eval-num-beams",
+        type=int,
+        default=4,
+        metavar="N",
+        help="Beam width for mbart generation during evaluation (default: 4; ignored for gemma4 greedy).",
+    )
 
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument(
@@ -261,7 +301,111 @@ def get_args_parser():
         help="Run in debug mode: only 1 epoch and 2 batches per split.",
     )
 
+    # * GMMLP pretrained vision encoder
+    parser.add_argument(
+        "--gmmlp_checkpoint",
+        default="",
+        help="Path to a GMMLP checkpoint (.pth) to use as the pretrained vision encoder. "
+        "When set, replaces the standard vision backbone with the GMMLP SigLIP2 ViT + "
+        "Perceiver encoder. The dataset will supply raw PIL frames for preprocessing.",
+    )
+    parser.add_argument(
+        "--gmmlp_model_id",
+        default="google/gemma-4-E2B-it",
+        help="HuggingFace model ID used when training the GMMLP checkpoint (needed to "
+        "reconstruct the vision tower architecture).",
+    )
+    parser.add_argument(
+        "--gmmlp_model_family",
+        default="gemma4",
+        choices=["llava", "gemma4"],
+        help="Model family of the GMMLP checkpoint ('gemma4' or 'llava').",
+    )
+    parser.add_argument("--gmmlp_lora_r", type=int, default=16)
+    parser.add_argument("--gmmlp_lora_alpha", type=int, default=32)
+    parser.add_argument("--gmmlp_lora_dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--gmmlp_num_latents",
+        type=int,
+        default=64,
+        help="Perceiver num_latents (K) used in the GMMLP checkpoint.",
+    )
+    parser.add_argument(
+        "--gmmlp_num_media_embeds",
+        type=int,
+        default=512,
+        help="Perceiver num_media_embeds used in the GMMLP checkpoint.",
+    )
+    parser.add_argument(
+        "--gmmlp_vision_chunk_size",
+        type=int,
+        default=8,
+        help="Frames processed per ViT chunk (matches GMMLP training value).",
+    )
+    parser.add_argument(
+        "--gmmlp_feat_cache",
+        default="",
+        help="Directory to store/load pre-extracted GMMLP ViT features. "
+        "Each video is saved as {cache}/{split}/{video_name}.pt containing a "
+        "(T, D_vit) tensor of mean-pooled spatial tokens.",
+    )
+    parser.add_argument(
+        "--preextract_gmmlp",
+        action="store_true",
+        help="Run ViT feature extraction over all splits before training. "
+        "Requires --gmmlp_checkpoint and --gmmlp_feat_cache. "
+        "Already-cached videos are skipped; training continues afterwards.",
+    )
+
     return parser
+
+
+@torch.no_grad()
+def _extract_vit_frames(encoder, pil_frames: list, device: torch.device) -> torch.Tensor:
+    """Run the ViT on all frames and return (T, D_vit) mean-pooled spatial tokens."""
+    vis_pooled: list[torch.Tensor] = []
+    for i in range(0, len(pil_frames), encoder.vision_chunk_size):
+        chunk = pil_frames[i : i + encoder.vision_chunk_size]
+        proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
+        if encoder.gemma4_max_soft_tokens is not None:
+            proc_kwargs["max_soft_tokens"] = encoder.gemma4_max_soft_tokens
+        inputs = encoder._image_processor(**proc_kwargs).to(device)
+        pv = inputs["pixel_values"].to(torch.bfloat16)
+        pos_ids = inputs.get("image_position_ids")
+        vis = encoder.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
+        if vis.dim() == 2:
+            c = len(chunk)
+            vis = vis.view(c, vis.shape[0] // c, vis.shape[-1])
+        vis_pooled.append(vis.mean(dim=1))
+    return torch.cat(vis_pooled, dim=0)  # (T, D_vit)
+
+
+def preextract_gmmlp_features(encoder, datasets, cache_dir: str, device: torch.device) -> None:
+    """Extract GMMLP ViT features for every video in each split and write to cache_dir.
+
+    Each video is stored as {cache_dir}/{split}/{video_name}.pt with shape (T_all, D_vit).
+    Already-cached videos are skipped so extraction can be resumed after interruption.
+    """
+    encoder.eval()
+    for phase, dataset in datasets.items():
+        out_dir = Path(cache_dir) / phase
+        out_dir.mkdir(parents=True, exist_ok=True)
+        total = len(dataset)
+        print(f"[preextract] {phase}: {total} videos → {out_dir}")
+        for idx in range(total):
+            key = dataset.list[idx]
+            vid_name = key.split("/")[1] if "/" in key else key
+            out_path = out_dir / f"{vid_name}.pt"
+            if out_path.exists():
+                continue
+            sample = dataset.raw_data[key]
+            img_paths = [dataset.img_path + x for x in sample["imgs_path"]]
+            pil_frames = dataset.load_all_pil_frames(img_paths)
+            vis_feats = _extract_vit_frames(encoder, pil_frames, device)
+            torch.save(vis_feats.cpu(), out_path)
+            if (idx + 1) % 50 == 0 or idx + 1 == total:
+                print(f"  {phase}: {idx + 1}/{total}")
+    print("[preextract] Done.")
 
 
 def main(args, config) -> None:
@@ -290,31 +434,23 @@ def main(args, config) -> None:
             model_max_length=1024,
         )
 
-    train_data = S2T_Dataset(
-        path=config["data"]["label_path"],
-        tokenizer=tokenizer,
-        config=config,
-        args=args,
-        phase="train",
-    )
+    use_gmmlp_backbone = bool(args.gmmlp_checkpoint)
+    dataset_kwargs = {
+        "path": config["data"]["label_path"],
+        "tokenizer": tokenizer,
+        "config": config,
+        "args": args,
+        "use_gmmlp_backbone": use_gmmlp_backbone,
+        "gmmlp_feat_cache": args.gmmlp_feat_cache or None,
+    }
+
+    train_data = S2T_Dataset(phase="train", **dataset_kwargs)
     print(train_data)
 
-    dev_data = S2T_Dataset(
-        path=config["data"]["label_path"],
-        tokenizer=tokenizer,
-        config=config,
-        args=args,
-        phase="dev",
-    )
+    dev_data = S2T_Dataset(phase="dev", **dataset_kwargs)
     print(dev_data)
 
-    test_data = S2T_Dataset(
-        path=config["data"]["label_path"],
-        tokenizer=tokenizer,
-        config=config,
-        args=args,
-        phase="test",
-    )
+    test_data = S2T_Dataset(phase="test", **dataset_kwargs)
     print(test_data)
 
     pin_mem = bool(args.pin_mem and args.device.startswith("cuda"))
@@ -360,14 +496,90 @@ def main(args, config) -> None:
 
     print("Creating model:")
 
+    gmmlp_encoder = None
+    if args.gmmlp_checkpoint:
+        print(f"Loading GMMLP encoder from {args.gmmlp_checkpoint} …")
+        from train_gmmlp import GMMLPImageEncoder
+
+        gmmlp_encoder = GMMLPImageEncoder(
+            model_id=args.gmmlp_model_id,
+            model_family=args.gmmlp_model_family,
+            lora_r=args.gmmlp_lora_r,
+            lora_alpha=args.gmmlp_lora_alpha,
+            lora_dropout=args.gmmlp_lora_dropout,
+            num_latents=args.gmmlp_num_latents,
+            num_media_embeds=args.gmmlp_num_media_embeds,
+            vision_chunk_size=args.gmmlp_vision_chunk_size,
+            temperature=0.07,
+        )
+        ckpt = torch.load(args.gmmlp_checkpoint, map_location="cpu", weights_only=False)
+        prefix = "model_image."
+        encoder_state = {
+            k[len(prefix) :]: v for k, v in ckpt["model"].items() if k.startswith(prefix)
+        }
+        missing, unexpected = gmmlp_encoder.load_state_dict(encoder_state, strict=False)
+        if missing:
+            print("GMMLP encoder missing keys:\n", "\n".join(missing))
+        if unexpected:
+            print("GMMLP encoder unexpected keys:\n", "\n".join(unexpected))
+        print(
+            f"Loaded GMMLP encoder (D_vit={gmmlp_encoder.vit_hidden}, K={gmmlp_encoder.num_latents})",
+        )
+
+        if args.preextract_gmmlp:
+            if not args.gmmlp_feat_cache:
+                msg = "--preextract_gmmlp requires --gmmlp_feat_cache to be set"
+                raise ValueError(msg)
+            gmmlp_encoder.to(device)
+            preextract_gmmlp_features(
+                gmmlp_encoder,
+                {"train": train_data, "dev": dev_data, "test": test_data},
+                args.gmmlp_feat_cache,
+                device,
+            )
+            gmmlp_encoder.cpu()
+
+        if args.gmmlp_feat_cache:
+            # ViT no longer needed — swap to a Perceiver-only encoder to free GPU memory
+            # before loading the Gemma4 LM.
+            vit_hidden = gmmlp_encoder.vit_hidden
+            light = GMMLPImageEncoder(
+                model_id=args.gmmlp_model_id,
+                model_family=args.gmmlp_model_family,
+                lora_r=args.gmmlp_lora_r,
+                lora_alpha=args.gmmlp_lora_alpha,
+                lora_dropout=args.gmmlp_lora_dropout,
+                num_latents=args.gmmlp_num_latents,
+                num_media_embeds=args.gmmlp_num_media_embeds,
+                vision_chunk_size=args.gmmlp_vision_chunk_size,
+                temperature=0.07,
+                preextracted_vit_dim=vit_hidden,
+            )
+            light.perceiver.load_state_dict(gmmlp_encoder.perceiver.state_dict())
+            light.cls_token.data.copy_(gmmlp_encoder.cls_token.data)
+            light.cls_attn.load_state_dict(gmmlp_encoder.cls_attn.state_dict())
+            del gmmlp_encoder
+            gc.collect()
+            torch.cuda.empty_cache()
+            gmmlp_encoder = light
+            print(f"Switched to Perceiver-only encoder (D_vit={vit_hidden}), ViT freed.")
+
     model = MMSLT(
         config,
         args,
         vision_backbone=args.vision_backbone,
         language_decoder=args.language_decoder,
         gemma4_model_id=args.gemma4_model_id,
+        gmmlp_encoder=gmmlp_encoder,
     )
-    model.to(device)
+    if args.language_decoder == "gemma4":
+        # Gemma4 LM is loaded with device_map="auto" + 4-bit bitsandbytes quantization,
+        # which can't be moved with .to(). Move every other sub-module explicitly.
+        for name, module in model.named_children():
+            if name != "gemma4":
+                module.to(device)
+    else:
+        model.to(device)
 
     if args.finetune:
         print("***********************************")
@@ -416,15 +628,15 @@ def main(args, config) -> None:
     if args.resume:
         print("Resuming Model Parameters... ")
         checkpoint = torch.load(args.resume, map_location="cpu")
-        model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
-        if (
-            not args.eval
-            and "optimizer" in checkpoint
-            and "lr_scheduler" in checkpoint
-            and "epoch" in checkpoint
-        ):
+        model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
+        if not args.eval and "optimizer" in checkpoint and "epoch" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            if (
+                lr_scheduler is not None
+                and "lr_scheduler" in checkpoint
+                and checkpoint["lr_scheduler"] is not None
+            ):
+                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
             args.start_epoch = checkpoint["epoch"] + 1
 
     if args.eval:
@@ -473,7 +685,7 @@ def main(args, config) -> None:
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in trange(args.start_epoch, args.epochs):
         train_stats = train_one_epoch(
             args,
             model,
@@ -484,71 +696,98 @@ def main(args, config) -> None:
             epoch,
             config,
         )
-        lr_scheduler.step(epoch)
+        if lr_scheduler is not None:
+            lr_scheduler.step(epoch)
 
         if args.output_dir:
-            checkpoint_paths = [output_dir / "checkpoint.pth"]
+            checkpoint_paths = [
+                output_dir / "checkpoint.pth",
+                output_dir / f"checkpoint_epoch_{epoch:04d}.pth",
+            ]
             for checkpoint_path in checkpoint_paths:
+                state = {
+                    "model": model_without_ddp.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                }
+                if lr_scheduler is not None:
+                    state["lr_scheduler"] = lr_scheduler.state_dict()
                 torch.save(
-                    {
-                        "model": model_without_ddp.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "epoch": epoch,
-                    },
+                    state,
                     checkpoint_path,
                 )
 
-        test_stats = evaluate(
-            args,
-            dev_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
-        )
-        print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
-        )
+        run_val = not args.skip_val and (epoch + 1) % args.eval_every == 0
+        if not run_val:
+            print(f"Skipping validation for epoch {epoch}.")
+            test_stats = {"loss": float("nan"), "belu4": float("nan")}
+        else:
+            test_stats = evaluate(
+                args,
+                dev_dataloader,
+                model,
+                model_without_ddp,
+                tokenizer,
+                ce_criterion,
+                config,
+                UNK_IDX,
+                SPECIAL_SYMBOLS,
+                PAD_IDX,
+                device,
+            )
+            print(
+                f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+            )
 
-        if max_accuracy < test_stats["belu4"]:
-            max_accuracy = test_stats["belu4"]
-            if args.output_dir:
-                checkpoint_paths = [output_dir / "best_checkpoint.pth"]
-                for checkpoint_path in checkpoint_paths:
-                    torch.save(
-                        {
+            if max_accuracy < test_stats["belu4"]:
+                max_accuracy = test_stats["belu4"]
+                if args.output_dir:
+                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
+                    for checkpoint_path in checkpoint_paths:
+                        state = {
                             "model": model_without_ddp.state_dict(),
                             "optimizer": optimizer.state_dict(),
-                            "lr_scheduler": lr_scheduler.state_dict(),
                             "epoch": epoch,
                             "args": args,
-                        },
-                        checkpoint_path,
-                    )
+                        }
+                        if lr_scheduler is not None:
+                            state["lr_scheduler"] = lr_scheduler.state_dict()
+                        torch.save(
+                            state,
+                            checkpoint_path,
+                        )
 
-        print(f"Max BELU-4: {max_accuracy:.2f}%")
-        wandb.log(
-            {
-                "epoch": epoch + 1,
-                "training/train_loss": train_stats["loss"],
-                "dev/dev_loss": test_stats["loss"],
-                "dev/Bleu_4": test_stats["belu4"],
-                "dev/Best_Bleu_4": max_accuracy,
-            },
-        )
+            print(f"Max BELU-4: {max_accuracy:.2f}%")
+
+        wandb_payload = {
+            "epoch": epoch + 1,
+            "training/train_loss": train_stats["loss"],
+        }
+        if run_val:
+            wandb_payload.update(
+                {
+                    "dev/dev_loss": test_stats["loss"],
+                    "dev/Bleu_4": test_stats["belu4"],
+                    "dev/Best_Bleu_4": max_accuracy,
+                },
+            )
+            if "bleu1" in test_stats:
+                wandb_payload["dev/Bleu_1"] = test_stats["bleu1"]
+            if "bleu2" in test_stats:
+                wandb_payload["dev/Bleu_2"] = test_stats["bleu2"]
+            if "bleu3" in test_stats:
+                wandb_payload["dev/Bleu_3"] = test_stats["bleu3"]
+            if "rouge_l" in test_stats:
+                wandb_payload["dev/Rouge_L"] = test_stats["rouge_l"]
+        wandb.log(wandb_payload)
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
-            **{f"test_{k}": v for k, v in test_stats.items()},
             "epoch": epoch,
             "n_parameters": n_parameters,
         }
+        if run_val:
+            log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
 
         if args.output_dir:
             with (output_dir / "log.txt").open("a") as f:
@@ -556,7 +795,7 @@ def main(args, config) -> None:
 
     # Last epoch
     test_on_last_epoch = True
-    if test_on_last_epoch and args.output_dir:
+    if test_on_last_epoch and args.output_dir and not args.skip_val:
         test_model_path = output_dir / "best_checkpoint.pth"
         if not test_model_path.exists():
             test_model_path = output_dir / "checkpoint.pth"
@@ -623,7 +862,13 @@ def train_one_epoch(
     print_freq = 10
 
     for step, (src_input, tgt_input) in enumerate(
-        metric_logger.log_every(data_loader, print_freq, header),
+        tqdm(
+            metric_logger.log_every(data_loader, print_freq, header),
+            total=len(data_loader),
+            desc=header,
+            leave=False,
+            disable=not utils.is_main_process(),
+        ),
     ):
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             out_logits = model(src_input, tgt_input)
@@ -677,7 +922,13 @@ def evaluate(
 
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
-            metric_logger.log_every(dev_dataloader, 10, header),
+            tqdm(
+                metric_logger.log_every(dev_dataloader, 10, header),
+                total=len(dev_dataloader),
+                desc=header,
+                leave=False,
+                disable=not utils.is_main_process(),
+            ),
         ):
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 out_logits = model(src_input, tgt_input)
@@ -694,8 +945,8 @@ def evaluate(
                 )
                 output = model_without_ddp.generate(
                     src_input,
-                    max_new_tokens=150,
-                    num_beams=8,
+                    max_new_tokens=args.eval_max_new_tokens,
+                    num_beams=args.eval_num_beams,
                     forced_bos_token_id=forced_bos,
                 )
             pred_texts = tokenizer.batch_decode(output.detach().cpu(), skip_special_tokens=True)
@@ -727,27 +978,64 @@ def evaluate(
     bleu_s = bleu.corpus_score(tgt_pres, [tgt_refs]).score
     metric_logger.meters["belu4"].update(bleu_s)
 
+    if args.eval_metrics and compute_metrics is not None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            hyp_path = os.path.join(tmp_dir, "tmp_pres.txt")
+            ref_path = os.path.join(tmp_dir, "tmp_refs.txt")
+            with open(hyp_path, "w") as f:
+                f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
+            with open(ref_path, "w") as f:
+                f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
+            print("\n" + "*" * 80)
+            metrics = compute_metrics(
+                hypothesis=hyp_path,
+                references=[ref_path],
+                no_skipthoughts=True,
+                no_glove=True,
+            )
+            print("*" * 80)
+
+        def _maybe_pct(value):
+            if value is None:
+                return None
+            return value * 100.0 if value <= 1.0 else value
+
+        bleu1 = _maybe_pct(metrics.get("Bleu_1"))
+        bleu2 = _maybe_pct(metrics.get("Bleu_2"))
+        bleu3 = _maybe_pct(metrics.get("Bleu_3"))
+        rouge_l = _maybe_pct(metrics.get("ROUGE_L"))
+
+        if bleu1 is not None:
+            metric_logger.update(bleu1=bleu1)
+        if bleu2 is not None:
+            metric_logger.update(bleu2=bleu2)
+        if bleu3 is not None:
+            metric_logger.update(bleu3=bleu3)
+        if rouge_l is not None:
+            metric_logger.update(rouge_l=rouge_l)
+
     metric_logger.synchronize_between_processes()
     print(f"* BELU-4 {metric_logger.belu4.global_avg:.3f} loss {metric_logger.loss.global_avg:.3f}")
 
-    if args.eval:
-        with open(args.output_dir + "/tmp_pres.txt", "w") as f:
-            f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
-        with open(args.output_dir + "/tmp_refs.txt", "w") as f:
-            f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
-        print("\n" + "*" * 80)
-        compute_metrics(
-            hypothesis=args.output_dir + "/tmp_pres.txt",
-            references=[args.output_dir + "/tmp_refs.txt"],
-            no_skipthoughts=True,
-            no_glove=True,
-        )
-        print("*" * 80)
+    metrics_parts = []
+    if "bleu1" in metric_logger.meters:
+        metrics_parts.append(f"BLEU-1 {metric_logger.bleu1.global_avg:.3f}")
+    if "bleu2" in metric_logger.meters:
+        metrics_parts.append(f"BLEU-2 {metric_logger.bleu2.global_avg:.3f}")
+    if "bleu3" in metric_logger.meters:
+        metrics_parts.append(f"BLEU-3 {metric_logger.bleu3.global_avg:.3f}")
+    if "rouge_l" in metric_logger.meters:
+        metrics_parts.append(f"ROUGE-L {metric_logger.rouge_l.global_avg:.3f}")
+    if metrics_parts:
+        print("* " + " ".join(metrics_parts))
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
 if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # Avoid "Too many open files" when DataLoader workers share thousands of
+    # pre-loaded tensors via the default file-descriptor strategy.
+    torch.multiprocessing.set_sharing_strategy("file_system")
 
     parser = argparse.ArgumentParser("MMSLT script", parents=[get_args_parser()])
     _.parse_file(Path(__file__).resolve().parent)
