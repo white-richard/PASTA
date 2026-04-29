@@ -9,6 +9,6 @@ data:
         dev: datasets/phoenix-descript/phoenix_SLdescriptions_siglip2_dev.pt
         test: datasets/phoenix-descript/phoenix_SLdescriptions_siglip2_test.pt
     img_path: datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px
-    max_length: 150 # 150 ~= 30fps | 500 ~= 120fps
+    max_length: 500 # 150 ~= 30fps | 500 ~= 120fps
 training:
     wandb: disabled # online | disabled

@@ -7,9 +7,10 @@ source "$(dirname "$0")/slib/monitor_cmd.bash"
 # === Config ===
 HF_MODEL_ID="google/gemma-4-26B-A4B-it"
 IMG_PATH="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/"
-SAVE_PATH="datasets/phoenix-descript/gmmlp_features"
+SAVE_PATH="out/phoenix-vision_feats/A4B_features"
 BATCH_SIZE=64
 NUM_WORKERS=8
+FEATURE_MODE="all_patches"
 SPLITS=(train dev test)
 # ==============
 
@@ -34,10 +35,10 @@ for SPLIT in "${SPLITS[@]}"; do
   PIDS=()
   for ((k=0; k<NUM_SHARDS; k++)); do
     GPU="${GPU_IDS[$k]}"
-    LABEL="extract_siglip2_${SPLIT}_shard${k}"
+    LABEL="extract_vision_feats_${SPLIT}_shard${k}"
     (
       export CUDA_VISIBLE_DEVICES="${GPU}"
-      monitor_cmd "${LABEL}" "out/gmmlp_features" python src/extract_siglip_gap.py \
+      monitor_cmd "${LABEL}" "out/gmmlp_features" python src/extract_vision_feats.py \
         --img_path "${IMG_PATH}" \
         --split "${SPLIT}" \
         --hf-model-id "${HF_MODEL_ID}" \
@@ -55,11 +56,12 @@ for SPLIT in "${SPLITS[@]}"; do
   done
 
   echo "=== [${SPLIT}] merge ==="
-  python src/extract_siglip_gap.py \
+  python src/extract_vision_feats.py \
     --split "${SPLIT}" \
     --save_path "${SAVE_PATH}" \
     --num-shards "${NUM_SHARDS}" \
     --merge \
+    --feature-mode $FEATURE_MODE \
     "$@"
 done
 

@@ -163,7 +163,7 @@ def run_extract(args) -> None:
     entries.sort()
 
     entries = entries[args.shard_id :: args.num_shards]
-    if args.debug_mode:
+    if args.debug:
         entries = entries[: 4 * args.batch_size]
     print(f"[shard {args.shard_id}/{args.num_shards}] frames: {len(entries)}")
 
@@ -182,7 +182,7 @@ def run_extract(args) -> None:
         persistent_workers=args.num_workers > 0,
     )
 
-    # {vid: {frame_idx: (D,) tensor}} — sparse, since this shard only owns a stride.
+    # {vid: {frame_idx: tensor}} — shape (D,) for gap, (P, D) for patches.
     frame_feats: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
     d_vit: int | None = None
 
@@ -197,14 +197,26 @@ def run_extract(args) -> None:
             if hs.dim() == 2:
                 c = pvs.shape[0]
                 hs = hs.view(c, hs.shape[0] // c, hs.shape[-1])
-            gap = hs.mean(dim=1).bfloat16().cpu()  # (B, D)
+            # hs: (B, P, D)
+            if args.feature_mode == "gap":
+                feat = hs.mean(dim=1).bfloat16().cpu()  # (B, D)
+            elif args.feature_mode == "all_patches":
+                feat = hs.bfloat16().cpu()  # (B, P, D)
+            else:  # subsample
+                P = hs.shape[1]
+                n = min(args.n_patches, P)
+                idx = torch.linspace(0, P - 1, n, device=hs.device).long()
+                feat = hs[:, idx, :].bfloat16().cpu()  # (B, n_patches, D)
             if d_vit is None:
-                d_vit = gap.shape[-1]
-            for f, vid, idx in zip(gap, vids, idxs, strict=True):
-                frame_feats[vid][idx] = f
+                d_vit = feat.shape[-1]
+            for f, vid, frame_idx in zip(feat, vids, idxs, strict=True):
+                frame_feats[vid][frame_idx] = f
 
     out_file = shard_path(pathlib.Path(args.save_path), args.split, args.shard_id, args.num_shards)
-    torch.save({"d_vit": d_vit, "frames": dict(frame_feats)}, out_file)
+    torch.save(
+        {"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": dict(frame_feats)},
+        out_file,
+    )
     print(f"[shard {args.shard_id}] saved → {out_file}")
 
 
@@ -212,6 +224,7 @@ def run_merge(args) -> None:
     save_path = pathlib.Path(args.save_path)
     merged: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
     d_vit: int | None = None
+    feature_mode: str | None = None
     missing = []
 
     for k in range(args.num_shards):
@@ -221,7 +234,10 @@ def run_merge(args) -> None:
             continue
         print(f"Loading {p}...")
         data = torch.load(p, map_location="cpu", weights_only=False)
-        d_vit = data["d_vit"] if d_vit is None else d_vit
+        if d_vit is None:
+            d_vit = data["d_vit"]
+        if feature_mode is None:
+            feature_mode = data.get("feature_mode", "gap")
         for vid, idx_map in data["frames"].items():
             merged[vid].update(idx_map)
 
@@ -230,15 +246,15 @@ def run_merge(args) -> None:
         raise FileNotFoundError(msg)
 
     print(f"Stacking {len(merged)} videos...")
-    out: dict = {"_meta": {"d_vit": d_vit}}
+    out: dict = {"_meta": {"d_vit": d_vit, "feature_mode": feature_mode}}
     for vid, idx_map in merged.items():
         order = sorted(idx_map.keys())
-        vis = torch.stack([idx_map[i] for i in order], dim=0)  # (T, D)
+        vis = torch.stack([idx_map[i] for i in order], dim=0)  # (T, D) or (T, P, D)
         out[vid] = {"vis": vis}
 
     final = final_path(save_path, args.split)
     torch.save(out, final)
-    print(f"Saved → {final}  (videos={len(merged)}, D_vit={d_vit})")
+    print(f"Saved → {final}  (videos={len(merged)}, D_vit={d_vit}, feature_mode={feature_mode})")
 
 
 def main() -> None:
@@ -259,7 +275,19 @@ def main() -> None:
         action="store_true",
         help="stitch shard files into features_{split}.pt",
     )
-    p.add_argument("--debug-mode", action="store_true")
+    p.add_argument(
+        "--feature-mode",
+        choices=["gap", "all_patches", "subsample"],
+        default="gap",
+        help="gap: mean-pool over patches (D,); all_patches: keep every patch (P, D); subsample: spatially-uniform subsample (n_patches, D)",
+    )
+    p.add_argument(
+        "--n-patches",
+        type=int,
+        default=64,
+        help="number of patches to keep when --feature-mode=subsample",
+    )
+    p.add_argument("--debug", action="store_true")
     args = p.parse_args()
 
     if args.merge:
