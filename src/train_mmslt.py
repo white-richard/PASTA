@@ -215,7 +215,7 @@ def get_args_parser():
     )
     parser.add_argument(
         "--language_decoder",
-        default="mbart",
+        default="gemma4",
         choices=["mbart", "gemma4"],
         help="Language decoder backend: mbart (default) or gemma4 (LoRA on global MLP expert + attention)",
     )
@@ -248,7 +248,7 @@ def get_args_parser():
         "--vision_backbone",
         type=str,
         default="resnet18",
-        help="Vision vision_backbone name. Use 'dummy' for a tiny random-weight model (fast smoke tests), or any timm model name (e.g. resnet18, vit_base_patch14_dinov2.lvd142m).",
+        help="Vision vision_backbone name. Use 'dummy' for a tiny random-weight model.",
     )
 
     # * visualization
@@ -405,7 +405,7 @@ def main(args, config) -> None:
 
     lr_scheduler = scheduler.CosineAnnealingLR(
         optimizer=optimizer,
-        eta_min=1e-8,
+        eta_min=args.lr*0.1,
         T_max=args.epochs,
     )
     ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
