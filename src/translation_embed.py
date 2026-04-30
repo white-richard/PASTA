@@ -20,7 +20,7 @@ parser.add_argument(
 parser.add_argument(
     "--features",
     choices=["pooled", "tokens", "both"],
-    default="pooled",
+    default="both",
     help="'pooled': store (1, D) pooler_output; 'tokens': store (1, L, D) last_hidden_state; 'both': store both.",
 )
 args = parser.parse_args()

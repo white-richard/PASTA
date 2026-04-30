@@ -11,6 +11,7 @@ SAVE_PATH="out/phoenix-vision_feats/A4B_features"
 BATCH_SIZE=128
 NUM_WORKERS=8
 FEATURE_MODE="all_patches"
+DEBUG=false          # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
 SPLITS=(train dev test)
 # ==============
 
@@ -47,6 +48,8 @@ for SPLIT in "${SPLITS[@]}"; do
         --save_path "${SAVE_PATH}" \
         --num-shards "${NUM_SHARDS}" \
         --shard-id "${k}" \
+        --feature-mode "${FEATURE_MODE}" \
+        $("${DEBUG}" && echo "--debug") \
         "$@"
     ) &
     PIDS+=($!)
