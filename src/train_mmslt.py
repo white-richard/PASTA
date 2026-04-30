@@ -256,7 +256,7 @@ def get_args_parser():
     )
     parser.add_argument(
         "--language_decoder",
-        default="gemma4",
+        default="mbart",
         choices=["mbart", "gemma4"],
         help="Language decoder backend: mbart (default) or gemma4 (LoRA on global MLP expert + attention)",
     )
@@ -355,7 +355,7 @@ def get_args_parser():
         action="store_true",
         help="Run ViT feature extraction over all splits before training. "
         "Requires --gmmlp_checkpoint and --gmmlp_feat_cache. "
-        "Already-cached videos are skipped; training continues afterwards.",
+        "Already-cached videos are skipped; training continues afterwards.",)
     parser.add_argument(
         "--fps",
         type=float,
