@@ -42,24 +42,25 @@ def _best_factors(n: int) -> tuple[int, int]:
 def spatial_pool(vis: torch.Tensor, n_tokens: int) -> torch.Tensor:
     """Pool (T, P, D) patch tensor to (T, H_out*W_out, D).
 
-    P must be a perfect square (H_in = W_in = sqrt(P)).
-    n_tokens is factorised into the nearest-to-square H_out × W_out.
+    P is factorised into the nearest-to-square H_in × W_in grid (handles
+    non-square patch counts like 63 = 7×9).  n_tokens is similarly factorised
+    into H_out × W_out.  Uses adaptive_avg_pool2d so fractional strides are
+    handled correctly.
     """
     T, P, D = vis.shape
-    H_in = int(math.isqrt(P))
-    if H_in * H_in != P:
-        msg = f"Patch count {P} is not a perfect square; cannot form spatial grid."
-        raise ValueError(msg)
+    H_in, W_in = _best_factors(P)
 
     H_out, W_out = _best_factors(n_tokens)
-    kH, kW = H_in // H_out, H_in // W_out
-    if kH < 1 or kW < 1:
-        msg = f"n_tokens={n_tokens} ({H_out}×{W_out}) is larger than input grid {H_in}×{H_in}."
+    if H_out > H_in or W_out > W_in:
+        msg = (
+            f"n_tokens={n_tokens} ({H_out}×{W_out}) exceeds input grid {H_in}×{W_in} "
+            f"(P={P}). Choose a smaller n_tokens."
+        )
         raise ValueError(msg)
 
-    # (T, P, D) → (T, D, H_in, H_in) for avg_pool2d
-    x = vis.permute(0, 2, 1).reshape(T, D, H_in, H_in).float()
-    x = F.avg_pool2d(x, kernel_size=(kH, kW), stride=(kH, kW))  # (T, D, H_out, W_out)
+    # (T, P, D) → (T, D, H_in, W_in) for pooling
+    x = vis.permute(0, 2, 1).reshape(T, D, H_in, W_in).float()
+    x = F.adaptive_avg_pool2d(x, (H_out, W_out))  # (T, D, H_out, W_out)
 
     actual = x.shape[2] * x.shape[3]
     x = x.reshape(T, D, actual).permute(0, 2, 1)  # (T, actual, D)
