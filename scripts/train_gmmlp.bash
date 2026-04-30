@@ -6,16 +6,16 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$(dirname "$0")/slib/monitor_cmd.bash"
 
 # Pre-extracted ViT features (set to "" to use live ViT + LoRA + grounding instead)
-# PREEXTRACTED_DIR="datasets/phoenix-descript/gmmlp_features"
-PREEXTRACTED_DIR=""
-SIGLIP_DIR="datasets/phoenix-descript"
+PREEXTRACTED_DIR="out/phoenix-vision_feats/A4B_features"
+N_TOKENS=64   # tokens/frame from pool_patches_spatial.py; 0 = raw all_patches
+# Translation token features for FILIP text side
+TRANSLATION_DIR="datasets/phoenix-translations"
+SIGLIP_TRAIN="${TRANSLATION_DIR}/phoenix_translations_siglip2_train.pt"
+SIGLIP_DEV="${TRANSLATION_DIR}/phoenix_translations_siglip2_dev.pt"
+SIGLIP_TEST="${TRANSLATION_DIR}/phoenix_translations_siglip2_test.pt"
 # Grounding features — only used when PREEXTRACTED_DIR is empty
 GROUNDING_DIR="datasets/phoenix-descript/hidden_states_gemma_4_26B_A4B_it_GGUF"
 GROUNDING_LAYER=20
-SIGLIP_TRAIN="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip2_train.pt"
-SIGLIP_DEV="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip2_dev.pt"
-SIGLIP_TEST="${SIGLIP_DIR}/phoenix_SLdescriptions_siglip2_test.pt"
-TRANSLATION_FEAT_PATH="datasets/phoenix-translations"
 # Set to any non-empty value to skip validation (adds --skip-validation).
 SKIP_VALIDATION=""
 
@@ -47,7 +47,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
   --siglip_feat_train "${SIGLIP_TRAIN}" \
   --siglip_feat_dev   "${SIGLIP_DEV}" \
   --siglip_feat_test  "${SIGLIP_TEST}" \
-  --translation_feat_path "${TRANSLATION_FEAT_PATH}" \
+  --n-tokens "${N_TOKENS}" \
   --num_workers 4 \
   --eval_num_workers 4 \
   ${SKIP_VALIDATION:+--skip-validation} \

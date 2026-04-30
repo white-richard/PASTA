@@ -11,6 +11,7 @@ SAVE_PATH="out/phoenix-vision_feats/A4B_features"
 BATCH_SIZE=128
 NUM_WORKERS=8
 FEATURE_MODE="all_patches"
+MAX_SOFT_TOKENS=70   # 70→63 ViT tokens (7×9), 140→~126, 280→~252 per frame
 DEBUG=false          # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
 SPLITS=(train dev test)
 # ==============
@@ -49,6 +50,7 @@ for SPLIT in "${SPLITS[@]}"; do
         --num-shards "${NUM_SHARDS}" \
         --shard-id "${k}" \
         --feature-mode "${FEATURE_MODE}" \
+        --max-soft-tokens "${MAX_SOFT_TOKENS}" \
         $("${DEBUG}" && echo "--debug") \
         "$@"
     ) &

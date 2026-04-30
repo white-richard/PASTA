@@ -38,25 +38,29 @@ from definition import *
 from grad_cache_util import (
     GradCacheWithGrounding,
     contrastive_loss_fn,
+    filip_loss_fn,
     split_tgt_input,
 )
 from load_descript_features import load_descript_features
 
 
 def load_siglip_features(path: str | Path) -> dict[str, torch.Tensor]:
-    """Load pre-extracted SigLIP text features saved by descript_embed.py --encoder siglip.
+    """Load SigLIP text token features.
 
-    File format: {vid_name: {"texts": [...], "siglip_feat": (T_desc, D_siglip)}}
+    File format: {vid_name: {"siglip2_token_feat": (n_translations, L, D)}}
 
-    Returns {vid_name: (D_siglip,)} — mean over frame descriptions.
+    Returns {vid_name: (L, D)} — mean over translations, token sequence kept.
+    Falls back to mean-pooled (D,) if token features are absent.
     """
     data = torch.load(path, weights_only=False)
-    return {
-        vid: (entry["siglip2_feat"] if "siglip2_feat" in entry else entry["siglip_feat"])
-        .float()
-        .mean(dim=0)
-        for vid, entry in data.items()
-    }
+    out = {}
+    for vid, entry in data.items():
+        if "siglip2_token_feat" in entry:
+            out[vid] = entry["siglip2_token_feat"].float().mean(dim=0)  # (L, D)
+        else:
+            key = "siglip2_feat" if "siglip2_feat" in entry else "siglip_feat"
+            out[vid] = entry[key].float().mean(dim=0)  # (D,) fallback
+    return out
 
 
 def info_nce(a: torch.Tensor, b: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
@@ -170,9 +174,19 @@ class GMMLPDataset(Dataset):
                 "grounding_feats": torch.stack(list(grounding_feats)),
                 "src_length_batch": torch.tensor([len(imgs) for imgs in images]),
             }
-        tgt_input = {
-            "siglip_feat": torch.stack(list(siglip_feats)),
-        }
+        # siglip_feats: list of (L_i, D) token tensors with variable L, or (D,) gap tensors.
+        # Pad variable-length token sequences to the batch max L with zeros.
+        feats_list = list(siglip_feats)
+        if feats_list[0].dim() == 2:
+            max_L = max(f.shape[0] for f in feats_list)
+            D = feats_list[0].shape[1]
+            padded = torch.zeros(len(feats_list), max_L, D)
+            for i, f in enumerate(feats_list):
+                padded[i, : f.shape[0]] = f
+            siglip_tensor = padded  # (B, max_L, D)
+        else:
+            siglip_tensor = torch.stack(feats_list)  # (B, D) gap fallback
+        tgt_input = {"siglip_feat": siglip_tensor}
         return src_input, tgt_input
 
     def __str__(self) -> str:
@@ -344,25 +358,24 @@ class GMMLPImageEncoder(nn.Module):
     def _forward_preextracted(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Bypass ViT using pre-extracted features; run only the Perceiver.
 
-        vis_feats / proj_feats are lists of (T_i, D_vit) / (T_i, D_llm) tensors.
-        No frame cap is applied: the Perceiver handles long sequences cheaply.
+        Returns (B, K, D) L2-normalised Perceiver latents for FILIP (one token
+        per Perceiver latent, no CLS collapse).
         """
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
-        sentence_embs: list[torch.Tensor] = []
+        vid_tokens_list: list[torch.Tensor] = []
         for vis_frames in src_input["vis_feats"]:
             vis_frames = vis_frames.to(device, dtype=dtype, non_blocking=True)
-            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D)
+            # (T, D) gap → (1, T, 1, D); (T, P, D) patches → (1, T, P, D)
+            x = vis_frames.unsqueeze(0) if vis_frames.dim() == 3 else vis_frames.unsqueeze(0).unsqueeze(2)
+            out = self.perceiver(x)  # (1, T, K, D)
             pooled = out.mean(dim=1)  # (1, K, D) — collapse temporal dim
-            cls = self.cls_token.to(dtype=dtype).expand(1, 1, -1)
-            cls_out, _ = self.cls_attn(cls, pooled, pooled, need_weights=False)
-            sentence_embs.append(cls_out.squeeze(1))  # (1, D)
-        sentence_emb = torch.cat(sentence_embs, dim=0)  # (B, D_vit)
-        if self.align_proj is not None:
-            sentence_emb = self.align_proj(sentence_emb)
-        # No projector in pre-extracted mode; return zeros for student_vid.
-        student_vid = torch.zeros(len(sentence_embs), 1, device=device, dtype=dtype)
-        return F.normalize(sentence_emb, dim=-1), student_vid
+            if self.align_proj is not None:
+                pooled = self.align_proj(pooled)  # (1, K, align_dim)
+            vid_tokens_list.append(F.normalize(pooled, dim=-1))  # (1, K, D)
+        vid_tokens = torch.cat(vid_tokens_list, dim=0)  # (B, K, D)
+        student_vid = torch.zeros(vid_tokens.shape[0], 1, device=device, dtype=dtype)
+        return vid_tokens, student_vid
 
     def forward_latents(self, src_input: dict) -> torch.Tensor:
         """Return (B, K, D_vit) Perceiver latents (before CLS pooling).
@@ -426,10 +439,17 @@ class GMMLPImageEncoder(nn.Module):
         B = len(feats)
         D = feats[0].shape[-1]
 
-        # Single padded transfer: (B, max_T, 1, D_vit)
-        padded = torch.zeros(B, max_T, 1, D, dtype=dtype, device=device)
-        for i, (f, t) in enumerate(zip(feats, lengths)):
-            padded[i, :t, 0, :] = f.to(dtype=dtype, non_blocking=True)
+        # Single padded transfer: (B, max_T, P, D_vit)
+        # feats[0] is (T, D) for gap or (T, P, D) for patches
+        if feats[0].dim() == 3:
+            n_patches = feats[0].shape[1]
+            padded = torch.zeros(B, max_T, n_patches, D, dtype=dtype, device=device)
+            for i, (f, t) in enumerate(zip(feats, lengths)):
+                padded[i, :t] = f[:t].to(dtype=dtype, non_blocking=True)
+        else:
+            padded = torch.zeros(B, max_T, 1, D, dtype=dtype, device=device)
+            for i, (f, t) in enumerate(zip(feats, lengths)):
+                padded[i, :t, 0, :] = f[:t].to(dtype=dtype, non_blocking=True)
 
         # One Perceiver call for the whole batch: (B, max_T, K, D)
         out = self.perceiver(padded)
@@ -493,7 +513,7 @@ class GMMLPImageEncoder(nn.Module):
         all_proj = torch.cat(proj_pooled_list, dim=0)  # (total_frames, D_llm)
 
         # Split by video, run Perceiver inline so patch tensors are freed per video.
-        sentence_embs: list[torch.Tensor] = []
+        vid_tokens_list: list[torch.Tensor] = []
         proj_means: list[torch.Tensor] = []
         start = 0
         for length in video_lengths:
@@ -501,31 +521,31 @@ class GMMLPImageEncoder(nn.Module):
             proj_frames = all_proj[start : start + length]  # (T, D_llm)
             # (1, T, 1, D_vit): media=T frames, 1 token each — uses temporal pos embs.
             out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D)
-            pooled = out.mean(dim=1)  # (1, K, D)
-            cls = self.cls_token.to(dtype=dtype).expand(1, 1, -1)
-            cls_out, _ = self.cls_attn(cls, pooled, pooled, need_weights=False)
-            sentence_embs.append(cls_out.squeeze(1))  # (1, D)
+            pooled = out.mean(dim=1)  # (1, K, D) — collapse temporal dim
+            if self.align_proj is not None:
+                pooled = self.align_proj(pooled)  # (1, K, align_dim)
+            vid_tokens_list.append(F.normalize(pooled, dim=-1))  # (1, K, D)
             proj_means.append(proj_frames.mean(dim=0))  # (D_llm,)
             start += length
 
-        sentence_emb = torch.cat(sentence_embs, dim=0)  # (B, D_vit)
+        vid_tokens = torch.cat(vid_tokens_list, dim=0)  # (B, K, D)
         student_vid = torch.stack(proj_means)  # (B, D_llm)
-
-        if self.align_proj is not None:
-            sentence_emb = self.align_proj(sentence_emb)  # (B, align_dim)
-        sentence_emb = F.normalize(sentence_emb, dim=-1)
-
-        return sentence_emb, student_vid
+        return vid_tokens, student_vid
 
 
 class GMMLPTextEncoder(nn.Module):
-    """Pass-through for pre-extracted, mean-pooled SigLIP sentence embeddings."""
+    """Pass-through for pre-extracted SigLIP token embeddings.
+
+    Returns (B, L, D) L2-normalised token tensors for FILIP, or (B, D) for
+    gap-mode fallback.  Zero-padded positions (from variable-length sequences)
+    normalise to zero vectors, which are detected as padding in filip_loss_fn.
+    """
 
     def forward(self, tgt_input: dict) -> torch.Tensor:
         feat = tgt_input["siglip_feat"].float()
         if torch.cuda.is_available():
             feat = feat.cuda()
-        return F.normalize(feat, dim=-1)
+        return F.normalize(feat, dim=-1)  # (B, L, D) or (B, D)
 
 
 class GMMLP(nn.Module):
@@ -560,7 +580,11 @@ class GMMLP(nn.Module):
         """Direct forward used during eval (no GradCache)."""
         sentence_emb, student_vid = self.model_image(src_input)
         text_feat = self.model_text(tgt_input)
-        align_loss = info_nce(sentence_emb, text_feat, self.temperature)
+        # sentence_emb: (B, K, D) video tokens; text_feat: (B, L, D) or (B, D)
+        if sentence_emb.dim() == 3 and text_feat.dim() == 3:
+            align_loss = filip_loss_fn(sentence_emb, text_feat, self.temperature)
+        else:
+            align_loss = info_nce(sentence_emb, text_feat, self.temperature)
 
         if self.lambda_ground == 0.0 or "grounding_feats" not in src_input:
             return align_loss, align_loss, torch.tensor(0.0, device=sentence_emb.device)
@@ -742,10 +766,19 @@ def get_args_parser():
     parser.add_argument(
         "--preextracted_feat_dir",
         type=str,
-        default="",
+        default="out/phoenix-vision_feats/A4B_features",
         help=(
-            "Directory containing features_{split}.pt files from extract_gmmlp_features.py. "
+            "Directory containing features_{split}[_spatial{n}tok].pt files. "
             "When set, the ViT is bypassed during training and only the Perceiver is trained."
+        ),
+    )
+    parser.add_argument(
+        "--n-tokens",
+        type=int,
+        default=64,
+        help=(
+            "Number of spatial patch tokens per frame to load (from pool_patches_spatial.py output). "
+            "Loads features_{split}_spatial{n}tok.pt. Set to 0 to load raw features_{split}.pt."
         ),
     )
 
@@ -779,7 +812,7 @@ def train_one_epoch(
         txt_encoder=model.model_text,
         img_chunk_size=chunk_size,
         txt_chunk_size=chunk_size,
-        align_loss_fn=contrastive_loss_fn,
+        align_loss_fn=filip_loss_fn,
         split_src_fn=split_gmmlp_src_input,
         split_tgt_fn=split_tgt_input,
         lambda_ground=args.lambda_ground,
@@ -932,7 +965,10 @@ def main(args, config) -> None:
         feat_dir = Path(args.preextracted_feat_dir)
         print(f"Loading pre-extracted ViT features from {feat_dir} …")
         for split in ["train", "dev", "test"]:
-            p = feat_dir / f"features_{split}.pt"
+            if args.n_tokens:
+                p = feat_dir / f"features_{split}_spatial{args.n_tokens}tok.pt"
+            else:
+                p = feat_dir / f"features_{split}.pt"
             vis_proj_by_split[split] = torch.load(p, map_location="cpu", weights_only=False)
             print(f"  [{split}] loaded {len(vis_proj_by_split[split])} videos")
 

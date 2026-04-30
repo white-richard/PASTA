@@ -81,6 +81,47 @@ def contrastive_loss_fn(sign_reps, text_reps, temperature=0.07):
     return (loss_s2t + loss_t2s) / 2.0
 
 
+def filip_loss_fn(v_tokens: Tensor, t_tokens: Tensor, temperature: float = 0.07) -> Tensor:
+    """FILIP symmetric contrastive loss (ICLR 2022).
+
+    v_tokens: (N, K, D) — L2-normalised video token reps (Perceiver latents).
+    t_tokens: (N, L, D) — L2-normalised text token reps, zero-padded to batch
+              max L.  Padded positions are detected by near-zero L2-norm.
+
+    Score(v_i, t_j):
+      v→t: mean_l  max_k  cos(v_i_k, t_j_l)   [text tokens are queries]
+      t→v: mean_k  max_l  cos(v_i_k, t_j_l)   [video tokens are queries]
+    Symmetric loss = (CE(S_vt, diag) + CE(S_tv.T, diag)) / 2.
+    """
+    # (N, N, K, L) — all cross-sample token similarities
+    sim = torch.einsum("ikd,jld->ijkl", v_tokens, t_tokens)
+
+    # Padding mask for text: real tokens have unit norm; padded zeros map to zero.
+    t_mask = (t_tokens.norm(dim=-1) > 1e-6)  # (N, L) bool
+
+    # --- v→t: for each text token l find best video token k, then mean over l ---
+    # sim.max(dim=2).values: (N_v, N_t, L)
+    max_over_k = sim.max(dim=2).values  # (Nv, Nt, L)
+    t_mask_j = t_mask.unsqueeze(0).float()  # (1, Nt, L)  — broadcast over Nv
+    sim_vt = (max_over_k * t_mask_j).sum(dim=-1) / t_mask_j.sum(dim=-1).clamp(min=1)
+
+    # --- t→v: for each video token k find best *real* text token l, then mean over k ---
+    # Mask padded text positions to -inf before taking max.
+    sim_tv_masked = sim.masked_fill(
+        ~t_mask.unsqueeze(0).unsqueeze(2), float("-inf")
+    )  # (Nv, Nt, K, L)
+    max_over_l = sim_tv_masked.max(dim=3).values  # (Nv, Nt, K)
+    sim_tv = max_over_l.mean(dim=-1)  # (Nv, Nt)
+
+    sim_vt = sim_vt / temperature
+    sim_tv = sim_tv / temperature
+
+    targets = torch.arange(v_tokens.shape[0], device=v_tokens.device)
+    loss_vt = F.cross_entropy(sim_vt, targets)
+    loss_tv = F.cross_entropy(sim_tv.T, targets)
+    return (loss_vt + loss_tv) / 2
+
+
 # Bug 8 fix: shared base for the dummy-param anchor pattern
 class _AnchoredEncoder(nn.Module):
     """Base class that anchors frozen encoder outputs to the autograd graph.
