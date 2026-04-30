@@ -108,17 +108,13 @@ def load_vision_tower(hf_model_id: str, device: torch.device) -> torch.nn.Module
 class FrameDataset(Dataset):
     """Workers do full image preprocessing so the GPU never waits on CPU."""
 
-    def __init__(self, entries, image_processor) -> None:
-        self.entries = entries
-        self.image_processor = image_processor
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
     def __init__(self, entries, image_processor, max_soft_tokens: int = 70) -> None:
         self.entries = entries
         self.image_processor = image_processor
         self.max_soft_tokens = max_soft_tokens
+
+    def __len__(self) -> int:
+        return len(self.entries)
 
     def __getitem__(self, i):
         vid, idx, path = self.entries[i]

@@ -24,7 +24,7 @@ from torch import nn
 from torch.backends import cudnn
 from torch.optim import lr_scheduler as scheduler
 from torch.utils.data import DataLoader
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from transformers import (
     MBart50TokenizerFast,
 )
@@ -346,16 +346,11 @@ def get_args_parser():
     parser.add_argument(
         "--gmmlp_feat_cache",
         default="",
-        help="Directory to store/load pre-extracted GMMLP ViT features. "
-        "Each video is saved as {cache}/{split}/{video_name}.pt containing a "
-        "(T, D_vit) tensor of mean-pooled spatial tokens.",
+        help="Directory of pre-extracted GMMLP ViT features produced by extract_vision_feats.py. "
+        "Each video must be saved as {cache}/{split}/{video_name}.pt containing a "
+        "(T, P, D_vit) patch tensor. When set, the ViT is not loaded and only the "
+        "Perceiver runs during training.",
     )
-    parser.add_argument(
-        "--preextract_gmmlp",
-        action="store_true",
-        help="Run ViT feature extraction over all splits before training. "
-        "Requires --gmmlp_checkpoint and --gmmlp_feat_cache. "
-        "Already-cached videos are skipped; training continues afterwards.",)
     parser.add_argument(
         "--fps",
         type=float,
@@ -366,52 +361,6 @@ def get_args_parser():
     return parser
 
 
-@torch.no_grad()
-def _extract_vit_frames(encoder, pil_frames: list, device: torch.device) -> torch.Tensor:
-    """Run the ViT on all frames and return (T, D_vit) mean-pooled spatial tokens."""
-    vis_pooled: list[torch.Tensor] = []
-    for i in range(0, len(pil_frames), encoder.vision_chunk_size):
-        chunk = pil_frames[i : i + encoder.vision_chunk_size]
-        proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
-        if encoder.gemma4_max_soft_tokens is not None:
-            proc_kwargs["max_soft_tokens"] = encoder.gemma4_max_soft_tokens
-        inputs = encoder._image_processor(**proc_kwargs).to(device)
-        pv = inputs["pixel_values"].to(torch.bfloat16)
-        pos_ids = inputs.get("image_position_ids")
-        vis = encoder.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
-        if vis.dim() == 2:
-            c = len(chunk)
-            vis = vis.view(c, vis.shape[0] // c, vis.shape[-1])
-        vis_pooled.append(vis.mean(dim=1))
-    return torch.cat(vis_pooled, dim=0)  # (T, D_vit)
-
-
-def preextract_gmmlp_features(encoder, datasets, cache_dir: str, device: torch.device) -> None:
-    """Extract GMMLP ViT features for every video in each split and write to cache_dir.
-
-    Each video is stored as {cache_dir}/{split}/{video_name}.pt with shape (T_all, D_vit).
-    Already-cached videos are skipped so extraction can be resumed after interruption.
-    """
-    encoder.eval()
-    for phase, dataset in datasets.items():
-        out_dir = Path(cache_dir) / phase
-        out_dir.mkdir(parents=True, exist_ok=True)
-        total = len(dataset)
-        print(f"[preextract] {phase}: {total} videos → {out_dir}")
-        for idx in range(total):
-            key = dataset.list[idx]
-            vid_name = key.split("/")[1] if "/" in key else key
-            out_path = out_dir / f"{vid_name}.pt"
-            if out_path.exists():
-                continue
-            sample = dataset.raw_data[key]
-            img_paths = [dataset.img_path + x for x in sample["imgs_path"]]
-            pil_frames = dataset.load_all_pil_frames(img_paths)
-            vis_feats = _extract_vit_frames(encoder, pil_frames, device)
-            torch.save(vis_feats.cpu(), out_path)
-            if (idx + 1) % 50 == 0 or idx + 1 == total:
-                print(f"  {phase}: {idx + 1}/{total}")
-    print("[preextract] Done.")
 
 
 def main(args, config) -> None:
@@ -531,19 +480,6 @@ def main(args, config) -> None:
         print(
             f"Loaded GMMLP encoder (D_vit={gmmlp_encoder.vit_hidden}, K={gmmlp_encoder.num_latents})",
         )
-
-        if args.preextract_gmmlp:
-            if not args.gmmlp_feat_cache:
-                msg = "--preextract_gmmlp requires --gmmlp_feat_cache to be set"
-                raise ValueError(msg)
-            gmmlp_encoder.to(device)
-            preextract_gmmlp_features(
-                gmmlp_encoder,
-                {"train": train_data, "dev": dev_data, "test": test_data},
-                args.gmmlp_feat_cache,
-                device,
-            )
-            gmmlp_encoder.cpu()
 
         if args.gmmlp_feat_cache:
             # ViT no longer needed — swap to a Perceiver-only encoder to free GPU memory
@@ -693,7 +629,6 @@ def main(args, config) -> None:
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = 0.0
-    for epoch in trange(args.start_epoch, args.epochs):
     train_peak_ram_gb = 0.0
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
@@ -749,30 +684,29 @@ def main(args, config) -> None:
             f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
         )
 
-            if max_accuracy < test_stats["belu4"]:
-                max_accuracy = test_stats["belu4"]
-                if args.output_dir:
-                    checkpoint_paths = [output_dir / "best_checkpoint.pth"]
-                    for checkpoint_path in checkpoint_paths:
-                        state = {
-                            "model": model_without_ddp.state_dict(),
-                            "optimizer": optimizer.state_dict(),
-                            "epoch": epoch,
-                            "args": args,
-                            "metrics": {
-                                "bleu1": test_stats.get("bleu1"),
-                                "bleu2": test_stats.get("bleu2"),
-                                "bleu3": test_stats.get("bleu3"),
-                                "bleu4": test_stats.get("bleu4"),
-                                "rouge_l": test_stats.get("rouge_l"),
-                                "dev_loss": test_stats.get("loss"),
-                                "train_loss": train_stats.get("loss"),
-                                "inference_time_per_video_s": test_stats.get("inference_time_per_video_s"),
-                                "inference_rtf": test_stats.get("inference_rtf"),
-                            },
-                        },
-                        checkpoint_path,
-                    )
+        if max_accuracy < test_stats["belu4"]:
+            max_accuracy = test_stats["belu4"]
+            if args.output_dir:
+                state = {
+                    "model": model_without_ddp.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "args": args,
+                    "metrics": {
+                        "bleu1": test_stats.get("bleu1"),
+                        "bleu2": test_stats.get("bleu2"),
+                        "bleu3": test_stats.get("bleu3"),
+                        "bleu4": test_stats.get("bleu4"),
+                        "rouge_l": test_stats.get("rouge_l"),
+                        "dev_loss": test_stats.get("loss"),
+                        "train_loss": train_stats.get("loss"),
+                        "inference_time_per_video_s": test_stats.get("inference_time_per_video_s"),
+                        "inference_rtf": test_stats.get("inference_rtf"),
+                    },
+                }
+                if lr_scheduler is not None:
+                    state["lr_scheduler"] = lr_scheduler.state_dict()
+                torch.save(state, output_dir / "best_checkpoint.pth")
 
         print(f"Max BELU-4: {max_accuracy:.2f}%")
         wandb.log(
@@ -796,7 +730,7 @@ def main(args, config) -> None:
             "epoch": epoch,
             "n_parameters": n_parameters,
         }
-        if run_val:
+        if not args.skip_val:
             log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
 
         if args.output_dir:
