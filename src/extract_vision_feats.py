@@ -115,10 +115,18 @@ class FrameDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entries)
 
+    def __init__(self, entries, image_processor, max_soft_tokens: int = 70) -> None:
+        self.entries = entries
+        self.image_processor = image_processor
+        self.max_soft_tokens = max_soft_tokens
+
     def __getitem__(self, i):
         vid, idx, path = self.entries[i]
         img = Image.open(path).convert("RGB")
-        out = self.image_processor(images=img, return_tensors="pt", max_soft_tokens=70)
+        kwargs: dict = {"images": img, "return_tensors": "pt"}
+        if self.max_soft_tokens:
+            kwargs["max_soft_tokens"] = self.max_soft_tokens
+        out = self.image_processor(**kwargs)
         pv = out["pixel_values"][0]  # (patches, patch_pixels) or (C, H, W)
         pos = out["image_position_ids"][0] if "image_position_ids" in out else None
         return pv, pos, vid, idx
@@ -172,7 +180,7 @@ def run_extract(args) -> None:
         if hasattr(image_processor, attr):
             setattr(image_processor, attr, False)
 
-    fd = FrameDataset(entries, image_processor)
+    fd = FrameDataset(entries, image_processor, max_soft_tokens=args.max_soft_tokens)
     loader = DataLoader(
         fd,
         batch_size=args.batch_size,
@@ -183,11 +191,25 @@ def run_extract(args) -> None:
     )
 
     # {vid: {frame_idx: tensor}} — shape (D,) for gap, (P, D) for patches.
+    # Flushed to disk every --checkpoint-every batches to avoid OOM when
+    # storing patch-level features (e.g. all_patches mode with 63 patches/frame
+    # × 827k train frames ≈ 120 GB if kept fully in RAM).
     frame_feats: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
     d_vit: int | None = None
+    checkpoint_files: list[pathlib.Path] = []
+
+    def _flush(batch_idx: int) -> None:
+        if not frame_feats:
+            return
+        ckpt = shard_path(save_path, args.split, args.shard_id, args.num_shards)
+        ckpt = ckpt.with_name(ckpt.stem + f"_ckpt{batch_idx}" + ckpt.suffix)
+        torch.save({"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": dict(frame_feats)}, ckpt)
+        checkpoint_files.append(ckpt)
+        frame_feats.clear()
+        print(f"  [flush] {ckpt.name}")
 
     with torch.inference_mode():
-        for pvs, pos_ids, vids, idxs in tqdm(loader, desc=f"shard {args.shard_id}"):
+        for batch_idx, (pvs, pos_ids, vids, idxs) in enumerate(tqdm(loader, desc=f"shard {args.shard_id}")):
             pv = pvs.to(device, dtype=torch.bfloat16, non_blocking=True)
             if pos_ids is not None:
                 pos_ids = pos_ids.to(device, non_blocking=True)
@@ -212,9 +234,28 @@ def run_extract(args) -> None:
             for f, vid, frame_idx in zip(feat, vids, idxs, strict=True):
                 frame_feats[vid][frame_idx] = f
 
+            if args.checkpoint_every and (batch_idx + 1) % args.checkpoint_every == 0:
+                _flush(batch_idx + 1)
+
+    # Final flush of any remaining frames.
+    _flush(len(loader))
+
+    if checkpoint_files:
+        # Merge all checkpoint files into the single shard file.
+        print(f"  merging {len(checkpoint_files)} checkpoints...")
+        merged: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
+        for ckpt in checkpoint_files:
+            data = torch.load(ckpt, map_location="cpu", weights_only=False)
+            for vid, idx_map in data["frames"].items():
+                merged[vid].update(idx_map)
+            ckpt.unlink()
+        out_frames = dict(merged)
+    else:
+        out_frames = dict(frame_feats)
+
     out_file = shard_path(pathlib.Path(args.save_path), args.split, args.shard_id, args.num_shards)
     torch.save(
-        {"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": dict(frame_feats)},
+        {"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": out_frames},
         out_file,
     )
     print(f"[shard {args.shard_id}] saved → {out_file}")
@@ -286,6 +327,27 @@ def main() -> None:
         type=int,
         default=64,
         help="number of patches to keep when --feature-mode=subsample",
+    )
+    p.add_argument(
+        "--max-soft-tokens",
+        type=int,
+        default=70,
+        choices=[0, 70, 140, 280, 560, 1120],
+        help=(
+            "Gemma4 image processor max_soft_tokens. Controls input patch resolution: "
+            "70→63 ViT tokens (7×9), 140→~126, 280→~252. Use 0 for non-Gemma4 processors."
+        ),
+    )
+    p.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=500,
+        help=(
+            "Flush frame_feats to a temp checkpoint file every N batches and clear RAM. "
+            "Checkpoints are merged into the shard file at the end. "
+            "Prevents OOM when storing patch-level features over large datasets. "
+            "Set to 0 to disable (original behaviour, keeps everything in RAM)."
+        ),
     )
     p.add_argument("--debug", action="store_true")
     args = p.parse_args()
