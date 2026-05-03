@@ -354,12 +354,25 @@ class MMSLT(nn.Module):
             )
             return out["logits"]
 
-    def generate(self, src_input, max_new_tokens, num_beams, forced_bos_token_id=None):
-
+    def generate(
+        self,
+        src_input,
+        max_new_tokens,
+        num_beams,
+        forced_bos_token_id=None,
+        repetition_penalty: float = 1.3,
+        no_repeat_ngram_size: int = 4,
+    ):
         inputs_embeds, attention_mask = self.share_forward(src_input)
 
         if self.language_decoder == "gemma4":
-            return self._gemma4_generate(inputs_embeds, attention_mask.cuda(), max_new_tokens)
+            return self._gemma4_generate(
+                inputs_embeds,
+                attention_mask.cuda(),
+                max_new_tokens,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+            )
         else:
             return self.mbart.generate(
                 inputs_embeds=inputs_embeds,
@@ -370,7 +383,14 @@ class MMSLT(nn.Module):
             )
 
     @torch.no_grad()
-    def _gemma4_generate(self, vis_embeds, attention_mask, max_new_tokens):
+    def _gemma4_generate(
+        self,
+        vis_embeds,
+        attention_mask,
+        max_new_tokens,
+        repetition_penalty: float = 1.3,
+        no_repeat_ngram_size: int = 4,
+    ):
         """Greedy decoding with prefix KV-cache seeded by vision embeddings.
 
         Calls Gemma4TextModel directly with same LoRA-adapted model used for
@@ -380,6 +400,28 @@ class MMSLT(nn.Module):
 
         B, T, _ = vis_embeds.shape
         device = vis_embeds.device
+
+        def _apply_penalties(logits: torch.Tensor, generated: torch.Tensor) -> torch.Tensor:
+            if repetition_penalty != 1.0 and generated.shape[1] > 0:
+                for b in range(B):
+                    for token_id in generated[b].unique():
+                        tid = token_id.item()
+                        if logits[b, tid] < 0:
+                            logits[b, tid] *= repetition_penalty
+                        else:
+                            logits[b, tid] /= repetition_penalty
+            if no_repeat_ngram_size > 0 and generated.shape[1] >= no_repeat_ngram_size:
+                for b in range(B):
+                    seq = generated[b].tolist()
+                    n = no_repeat_ngram_size
+                    banned: set[int] = set()
+                    ngram_prefix = tuple(seq[-(n - 1):])
+                    for i in range(len(seq) - (n - 1)):
+                        if tuple(seq[i: i + n - 1]) == ngram_prefix:
+                            banned.add(seq[i + n - 1])
+                    for tid in banned:
+                        logits[b, tid] = -float("inf")
+            return logits
 
         # 1. Prefill KV cache with vision prefix
         past_kv = DynamicCache()
@@ -392,6 +434,8 @@ class MMSLT(nn.Module):
             use_cache=True,
         )
         logits = self._g4_logits(outputs.last_hidden_state[:, -1, :])   # (B, vocab)
+        generated = torch.empty(B, 0, dtype=torch.long, device=device)
+        logits = _apply_penalties(logits, generated)
         next_token = logits.argmax(dim=-1, keepdim=True)                 # (B, 1)
         generated = next_token
 
@@ -416,6 +460,7 @@ class MMSLT(nn.Module):
                 use_cache=True,
             )
             logits = self._g4_logits(outputs.last_hidden_state[:, -1, :])
+            logits = _apply_penalties(logits, generated)
             next_token = logits.argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=1)
             full_mask = torch.cat(
