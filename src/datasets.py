@@ -190,7 +190,17 @@ def load_dataset_file(filename):
 
 
 class S2T_Dataset(Dataset):
-    def __init__(self, path, tokenizer, config, args, phase, use_gmmlp_backbone=False, gmmlp_feat_cache=None) -> None:
+    def __init__(
+        self,
+        path,
+        tokenizer,
+        config,
+        args,
+        phase,
+        use_gmmlp_backbone=False,
+        gmmlp_feat_cache=None,
+        gmmlp_n_tokens: int = 0,
+    ) -> None:
         self.config = config
         self.args = args
 
@@ -205,22 +215,39 @@ class S2T_Dataset(Dataset):
         self.max_length = config["data"]["max_length"]
         self.img_path = config["data"]["img_path"]
         self.use_gmmlp_backbone = use_gmmlp_backbone
-        self.gmmlp_feat_cache = Path(gmmlp_feat_cache) / phase if gmmlp_feat_cache else None
+
+        # Resolve per-video feature directory.
+        # New format: {cache}/features_{phase}[_spatial{n}tok]/ with per-video .pt files.
+        # Old format fallback: {cache}/{phase}/ with raw tensor .pt files.
+        self.gmmlp_feat_dir: Path | None = None
+        self._gmmlp_feat_is_dict = False  # True when files contain {"vis": tensor}
+        if gmmlp_feat_cache:
+            root = Path(gmmlp_feat_cache)
+            if gmmlp_n_tokens:
+                new_dir = root / f"features_{phase}_spatial{gmmlp_n_tokens}tok"
+            else:
+                new_dir = root / f"features_{phase}"
+            if new_dir.exists():
+                self.gmmlp_feat_dir = new_dir
+                self._gmmlp_feat_is_dict = True
+            else:
+                # Fall back to old-style {cache}/{phase}/ directory.
+                old_dir = root / phase
+                if old_dir.exists():
+                    self.gmmlp_feat_dir = old_dir
 
         self.list = [key for key, value in self.raw_data.items()]
 
-        # Pre-load all cached ViT features into RAM so __getitem__ avoids per-sample
-        # file I/O, which otherwise stalls the GPU waiting on the DataLoader.
-        self._gmmlp_feats: dict[str, torch.Tensor] | None = None
-        if use_gmmlp_backbone and self.gmmlp_feat_cache is not None:
-            feats: dict[str, torch.Tensor] = {}
-            for key in self.list:
-                vid_name = key.split("/")[1] if "/" in key else key
-                pt = self.gmmlp_feat_cache / f"{vid_name}.pt"
-                if pt.exists():
-                    feats[vid_name] = torch.load(pt, weights_only=True)
-            self._gmmlp_feats = feats
-            print(f"  [{phase}] pre-loaded {len(feats)}/{len(self.list)} GMMLP feature tensors")
+        if use_gmmlp_backbone and self.gmmlp_feat_dir is not None:
+            # Keep only videos that have a feature file — avoids mixed batches where
+            # some items return vis_feats and others return PIL frames (which breaks
+            # collate_fn when the ViT is not loaded).
+            full_len = len(self.list)
+            self.list = [
+                key for key in self.list
+                if (self.gmmlp_feat_dir / f"{key.split('/')[1] if '/' in key else key}.pt").exists()
+            ]
+            print(f"  [{phase}] lazy GMMLP features from {self.gmmlp_feat_dir.name}/ ({len(self.list)}/{full_len} found)")
 
         def sometimes(aug):
             return va.Sometimes(
@@ -239,7 +266,7 @@ class S2T_Dataset(Dataset):
         )
 
     def __len__(self) -> int:
-        return len(self.raw_data)
+        return len(self.list)
 
     def __getitem__(self, index):
         key = self.list[index]
@@ -253,18 +280,20 @@ class S2T_Dataset(Dataset):
 
         if self.use_gmmlp_backbone:
             vid_name = key.split("/")[1] if "/" in key else key
-            if self._gmmlp_feats is not None and vid_name in self._gmmlp_feats:
-                # Cache hit: skip frame loading entirely; apply random subsampling to feats
-                vis_feats_full = self._gmmlp_feats[vid_name]  # (T_all, D_vit)
-                n = len(vis_feats_full)
-                if n > self.max_length:
-                    selected_indices = sorted(random.sample(range(n), k=self.max_length))
-                    vis_feats = vis_feats_full[selected_indices]
-                    descript_sample = descript_sample[selected_indices]
-                else:
-                    vis_feats = vis_feats_full
-                return name_sample, descript_sample, tgt_sample, None, None, vis_feats
-            # No cache: fall back to PIL frames
+            if self.gmmlp_feat_dir is not None:
+                pt = self.gmmlp_feat_dir / f"{vid_name}.pt"
+                if pt.exists():
+                    data = torch.load(pt, map_location="cpu", weights_only=False)
+                    vis_feats_full = data["vis"] if self._gmmlp_feat_is_dict else data
+                    n = len(vis_feats_full)
+                    if n > self.max_length:
+                        selected_indices = sorted(random.sample(range(n), k=self.max_length))
+                        vis_feats = vis_feats_full[selected_indices]
+                        descript_sample = descript_sample[selected_indices]
+                    else:
+                        vis_feats = vis_feats_full
+                    return name_sample, descript_sample, tgt_sample, None, None, vis_feats
+            # No cache hit: fall back to PIL frames
             img_sample, selected_indices = self.load_imgs(img_paths)
             if selected_indices is not None:
                 descript_sample = descript_sample[selected_indices]
@@ -351,8 +380,8 @@ class S2T_Dataset(Dataset):
         return imgs, selected_indices
 
     def collate_fn(self, batch):
-        # Fast path: GMMLP + full cache — skip all img/descript tensor work entirely.
-        if self._gmmlp_feats is not None:
+        # Fast path: all items have vis_feats from the per-video feature cache.
+        if self.use_gmmlp_backbone and all(item[-1] is not None for item in batch):
             name_batch, tgt_batch, vis_feats_batch = [], [], []
             for name_sample, _descript, tgt_sample, _img, _pil, vis_feats in batch:
                 name_batch.append(name_sample)
@@ -364,7 +393,8 @@ class S2T_Dataset(Dataset):
                 padding=True,
                 truncation=True,
             )
-            return {"vis_feats": vis_feats_batch, "name_batch": name_batch}, tgt_input
+            src_length_batch = torch.tensor([len(v) for v in vis_feats_batch])
+            return {"vis_feats": vis_feats_batch, "name_batch": name_batch, "src_length_batch": src_length_batch}, tgt_input
 
         tgt_batch, txt_tmp, src_length_batch, name_batch, img_tmp = [], [], [], [], []
         pil_frames_batch = [] if self.use_gmmlp_backbone else None
