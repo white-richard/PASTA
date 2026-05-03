@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import shutil
 import struct
 from collections import defaultdict
 
@@ -137,12 +138,76 @@ def collate(batch):
     return pvs, pos, vids, idxs
 
 
-def shard_path(save_path: pathlib.Path, split: str, shard_id: int, num_shards: int) -> pathlib.Path:
-    return save_path / f"_shard{shard_id}of{num_shards}_{split}.pt"
+def shard_dir(save_path: pathlib.Path, split: str, shard_id: int, num_shards: int) -> pathlib.Path:
+    return save_path / f"_shard{shard_id}of{num_shards}_{split}"
 
 
-def final_path(save_path: pathlib.Path, split: str) -> pathlib.Path:
-    return save_path / f"features_{split}.pt"
+def final_dir(save_path: pathlib.Path, split: str) -> pathlib.Path:
+    return save_path / f"features_{split}"
+
+
+def _save_per_video(
+    out_dir: pathlib.Path,
+    frames: dict[str, dict[int, torch.Tensor]],
+    d_vit: int,
+    feature_mode: str,
+) -> None:
+    """Write a {vid: {frame_idx: tensor}} dict to per-video .pt files in out_dir."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vids = []
+    for vid, idx_map in frames.items():
+        order = sorted(idx_map.keys())
+        vis = torch.stack([idx_map[k] for k in order])
+        torch.save({"vis": vis}, out_dir / f"{vid}.pt")
+        vids.append(vid)
+    torch.save({"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)}, out_dir / "_meta.pt")
+
+
+def stream_merge_to_dir(
+    checkpoint_files: list[pathlib.Path],
+    out_dir: pathlib.Path,
+    d_vit: int,
+    feature_mode: str,
+) -> None:
+    """Stream-merge checkpoint .pt files into per-video files without full-RAM accumulation.
+
+    Each checkpoint contains {vid: {frame_idx: tensor}}.  Because entries are sorted by
+    (vid, frame_idx) before batching, at most 1 video per checkpoint straddles a boundary;
+    all others are fully contained in a single checkpoint.  The partial-file read-modify-write
+    is therefore almost always a no-op (O(1) boundary videos per checkpoint).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    partial_dir = out_dir / "_partial"
+    partial_dir.mkdir(exist_ok=True)
+
+    print(f"  streaming merge of {len(checkpoint_files)} checkpoints → {out_dir}")
+    for ckpt in tqdm(checkpoint_files, desc="stream merge"):
+        data = torch.load(ckpt, map_location="cpu", weights_only=False)
+        for vid, idx_map in data["frames"].items():
+            vpath = partial_dir / f"{vid}.pt"
+            if vpath.exists():
+                existing: dict[int, torch.Tensor] = torch.load(vpath, map_location="cpu", weights_only=False)
+                existing.update(idx_map)
+                torch.save(existing, vpath)
+            else:
+                torch.save(dict(idx_map), vpath)
+        del data
+        ckpt.unlink()
+
+    vids: list[str] = []
+    print("  stacking per-video frames…")
+    for vpath in tqdm(sorted(partial_dir.iterdir()), desc="finalize"):
+        vid = vpath.stem
+        idx_map = torch.load(vpath, map_location="cpu", weights_only=False)
+        order = sorted(idx_map.keys())
+        vis = torch.stack([idx_map[k] for k in order])
+        torch.save({"vis": vis}, out_dir / f"{vid}.pt")
+        vpath.unlink()
+        vids.append(vid)
+
+    partial_dir.rmdir()
+    torch.save({"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)}, out_dir / "_meta.pt")
+    print(f"  wrote {len(vids)} per-video files")
 
 
 def run_extract(args) -> None:
@@ -197,8 +262,7 @@ def run_extract(args) -> None:
     def _flush(batch_idx: int) -> None:
         if not frame_feats:
             return
-        ckpt = shard_path(save_path, args.split, args.shard_id, args.num_shards)
-        ckpt = ckpt.with_name(ckpt.stem + f"_ckpt{batch_idx}" + ckpt.suffix)
+        ckpt = save_path / f"_shard{args.shard_id}of{args.num_shards}_{args.split}_ckpt{batch_idx}.pt"
         torch.save({"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": dict(frame_feats)}, ckpt)
         checkpoint_files.append(ckpt)
         frame_feats.clear()
@@ -236,62 +300,73 @@ def run_extract(args) -> None:
     # Final flush of any remaining frames.
     _flush(len(loader))
 
+    out_dir = shard_dir(save_path, args.split, args.shard_id, args.num_shards)
     if checkpoint_files:
-        # Merge all checkpoint files into the single shard file.
-        print(f"  merging {len(checkpoint_files)} checkpoints...")
-        merged: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
-        for ckpt in checkpoint_files:
-            data = torch.load(ckpt, map_location="cpu", weights_only=False)
-            for vid, idx_map in data["frames"].items():
-                merged[vid].update(idx_map)
-            ckpt.unlink()
-        out_frames = dict(merged)
+        stream_merge_to_dir(checkpoint_files, out_dir, d_vit, args.feature_mode)
     else:
-        out_frames = dict(frame_feats)
+        _save_per_video(out_dir, dict(frame_feats), d_vit, args.feature_mode)
 
-    out_file = shard_path(pathlib.Path(args.save_path), args.split, args.shard_id, args.num_shards)
-    torch.save(
-        {"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": out_frames},
-        out_file,
-    )
-    print(f"[shard {args.shard_id}] saved → {out_file}")
+    print(f"[shard {args.shard_id}] saved → {out_dir}")
 
 
 def run_merge(args) -> None:
     save_path = pathlib.Path(args.save_path)
-    merged: dict[str, dict[int, torch.Tensor]] = defaultdict(dict)
+    out_dir = final_dir(save_path, args.split)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     d_vit: int | None = None
     feature_mode: str | None = None
+    all_vids: list[str] = []
     missing = []
 
     for k in range(args.num_shards):
-        p = shard_path(save_path, args.split, k, args.num_shards)
-        if not p.exists():
-            missing.append(str(p))
+        src = shard_dir(save_path, args.split, k, args.num_shards)
+        if not src.exists():
+            missing.append(str(src))
             continue
-        print(f"Loading {p}...")
-        data = torch.load(p, map_location="cpu", weights_only=False)
+        print(f"Merging shard {src.name} …")
+        meta = torch.load(src / "_meta.pt", map_location="cpu", weights_only=False)
         if d_vit is None:
-            d_vit = data["d_vit"]
+            d_vit = meta["d_vit"]
         if feature_mode is None:
-            feature_mode = data.get("feature_mode", "gap")
-        for vid, idx_map in data["frames"].items():
-            merged[vid].update(idx_map)
+            feature_mode = meta.get("feature_mode", "gap")
+        for vid in meta["vids"]:
+            shutil.move(str(src / f"{vid}.pt"), str(out_dir / f"{vid}.pt"))
+            all_vids.append(vid)
+        shutil.rmtree(str(src))
 
     if missing:
-        msg = "Missing shard files:\n  " + "\n  ".join(missing)
+        msg = "Missing shard directories:\n  " + "\n  ".join(missing)
         raise FileNotFoundError(msg)
 
-    print(f"Stacking {len(merged)} videos...")
-    out: dict = {"_meta": {"d_vit": d_vit, "feature_mode": feature_mode}}
-    for vid, idx_map in merged.items():
-        order = sorted(idx_map.keys())
-        vis = torch.stack([idx_map[i] for i in order], dim=0)  # (T, D) or (T, P, D)
-        out[vid] = {"vis": vis}
+    torch.save(
+        {"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(all_vids)},
+        out_dir / "_meta.pt",
+    )
+    print(f"Saved → {out_dir}  (videos={len(all_vids)}, D_vit={d_vit}, feature_mode={feature_mode})")
 
-    final = final_path(save_path, args.split)
-    torch.save(out, final)
-    print(f"Saved → {final}  (videos={len(merged)}, D_vit={d_vit}, feature_mode={feature_mode})")
+
+def run_finalize_checkpoints(args) -> None:
+    """Stream-merge checkpoint files left behind after an OOM-killed extraction run."""
+    save_path = pathlib.Path(args.save_path)
+    pattern = f"_shard{args.shard_id}of{args.num_shards}_{args.split}_ckpt*.pt"
+    ckpts = sorted(save_path.glob(pattern))
+    if not ckpts:
+        print(f"No checkpoint files found matching {pattern!r} in {save_path}")
+        return
+    print(f"Found {len(ckpts)} checkpoint files:")
+    for c in ckpts:
+        print(f"  {c.name}  ({c.stat().st_size / 1e9:.1f} GB)")
+
+    first = torch.load(ckpts[0], map_location="cpu", weights_only=False)
+    d_vit = first["d_vit"]
+    feature_mode = first.get("feature_mode", args.feature_mode)
+    del first
+
+    out_dir = shard_dir(save_path, args.split, args.shard_id, args.num_shards)
+    stream_merge_to_dir(ckpts, out_dir, d_vit, feature_mode)
+    print(f"[shard {args.shard_id}] merged → {out_dir}")
+    print("Run with --merge to combine shards into the final features directory.")
 
 
 def main() -> None:
@@ -346,10 +421,20 @@ def main() -> None:
         ),
     )
     p.add_argument("--debug", action="store_true")
+    p.add_argument(
+        "--finalize-checkpoints",
+        action="store_true",
+        help=(
+            "Stream-merge checkpoint .pt files left behind by an OOM-killed extraction run "
+            "into a per-video shard directory.  Run --merge afterwards to combine shards."
+        ),
+    )
     args = p.parse_args()
 
     if args.merge:
         run_merge(args)
+    elif args.finalize_checkpoints:
+        run_finalize_checkpoints(args)
     else:
         assert 0 <= args.shard_id < args.num_shards
         run_extract(args)
