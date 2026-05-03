@@ -13,7 +13,7 @@ NUM_WORKERS=8
 FEATURE_MODE="all_patches"
 MAX_SOFT_TOKENS=70   # 70→63 ViT tokens (7×9), 140→~126, 280→~252 per frame
 DEBUG=false          # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
-SPLITS=(train dev test)
+SPLITS=( dev test)
 # ==============
 
 # Determine GPUs / shard count
@@ -30,6 +30,8 @@ fi
 echo "Using ${NUM_SHARDS} GPU(s): ${GPU_IDS[*]}"
 
 mkdir -p "${SAVE_PATH}"
+
+SPLITS=(dev test)
 
 # Run per-split: extract shards in parallel, then merge
 for SPLIT in "${SPLITS[@]}"; do
@@ -70,4 +72,4 @@ for SPLIT in "${SPLITS[@]}"; do
     "$@"
 done
 
-echo "Done. Features written to ${SAVE_PATH}/features_{train,dev,test}.pt"
+echo "Done. Features written to ${SAVE_PATH}/features_{train,dev,test}/"

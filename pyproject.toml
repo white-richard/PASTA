@@ -32,6 +32,7 @@ dependencies = [
     "turboquant-vllm[vllm]",
     "transformers @ git+https://github.com/huggingface/transformers.git",
     "textual>=0.80.0",
+    "rouge_score",
 ]
 
 [tool.setuptools.packages.find]
@@ -48,4 +49,3 @@ torchvision = { index = "pytorch-cu124" }
 torchaudio = { index = "pytorch-cu124" }
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl" }
 nlg-eval = { url = "file:///src/nlg-eval-temp" }
-

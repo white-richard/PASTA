@@ -13,7 +13,7 @@ VISION_BACKBONE="resnet18"
 CONFIG="src/configs/config_mmslt_phoenix.yaml"
 OUTPUT_DIR="out/mmslt"
 SKIP_VAL="false"
-EVAL_EVERY=100          # run dev evaluation every N epochs
+EVAL_EVERY=5  # run dev evaluation every N epochs
 EVAL_MAX_NEW_TOKENS=80  # Phoenix avg translation ~10 words; 80 is generous
 EVAL_NUM_BEAMS=4        # ignored for gemma4 (greedy), used for mbart
 # Set to true to pass --eval-metrics (extra BLEU-1/2/3 and ROUGE during evaluation).
@@ -25,7 +25,7 @@ TEST_CHECKPOINT=""
 # Optional: path to a pretrained GMMLP checkpoint (from train_gmmlp.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
-GMMLP_CHECKPOINT="out/gmmlp/checkpoint.pth"
+GMMLP_CHECKPOINT="out/gmmlp/checkpoint_epoch_99_devloss_3p4993.pth"
 # Architecture must match the checkpoint produced by train_gmmlp.bash.
 GMMLP_MODEL_ID="google/gemma-4-E2B-it"
 GMMLP_MODEL_FAMILY="gemma4"
@@ -82,16 +82,18 @@ if [[ -n "${TEST_CHECKPOINT}" ]]; then
 fi
 
 monitor_cmd "train_mmslt" "${OUTPUT_DIR}" python src/train_mmslt.py \
-  --batch-size 8 \
-  --epochs 10 \
+  --batch-size 4 \
+  --accum-steps 4 \
+  --gradient-checkpointing \
+  --epochs 50 \
   --opt adamw \
-  --lr 1e-4 \
+  --lr 5e-4 \
   --weight-decay 0.001 \
-  --warmup-epochs 1 \
+  --warmup-epochs 0 \
   --config "${CONFIG}" \
   --vision_backbone "${VISION_BACKBONE}" \
-  --gmmlp_feat_cache "out/gmmlp_vit_feats" \
-  --no-lr-scheduler \
+  --gmmlp_feat_cache "out/phoenix-vision_feats/A4B_features" \
+  --gmmlp_n_tokens 0 \
   --output_dir "${OUTPUT_DIR}" \
   --num_workers 8 \
   --eval_num_workers 4 \

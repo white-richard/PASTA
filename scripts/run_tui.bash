@@ -17,7 +17,7 @@ CONFIG="src/configs/config_mmslt_phoenix.yaml"
 CHECKPOINT="${1:-out/mmslt/best_checkpoint.pth}"
 
 # ── GMMLP ───────────────────────────────────────────────────────────────────
-GMMLP_CHECKPOINT="out/gmmlp/checkpoint.pth"
+GMMLP_CHECKPOINT="out/gmmlp/best_checkpoint.pth"
 GMMLP_MODEL_ID="google/gemma-4-E2B-it"
 GMMLP_MODEL_FAMILY="gemma4"
 GMMLP_NUM_LATENTS=64
@@ -25,7 +25,7 @@ GMMLP_NUM_MEDIA_EMBEDS=512
 GMMLP_VISION_CHUNK_SIZE=8
 GMMLP_LORA_R=16
 GMMLP_LORA_ALPHA=32
-GMMLP_FEAT_CACHE="out/gmmlp_vit_feats"
+GMMLP_FEAT_CACHE="out/phoenix-vision_feats/A4B_features"
 
 # Inference params
 EVAL_MAX_NEW_TOKENS=80
@@ -46,7 +46,8 @@ if [[ -n "${GMMLP_CHECKPOINT}" && -f "${GMMLP_CHECKPOINT}" ]]; then
   )
 fi
 
-uv run python -m tui.app \
+source "$(dirname "$0")/../.venv/bin/activate"
+python -m tui.app \
   --checkpoint "${CHECKPOINT}" \
   --config "${CONFIG}" \
   --language_decoder "${LANGUAGE_DECODER}" \
