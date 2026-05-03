@@ -203,6 +203,15 @@ class InferenceEngine:
         gmmlp_encoder = None
         if gmmlp_checkpoint:
             from train_gmmlp import GMMLPImageEncoder
+
+            # Read D_vit from feature cache metadata to skip loading the ViT.
+            preextracted_vit_dim = None
+            if gmmlp_feat_cache:
+                meta_path = Path(gmmlp_feat_cache) / "features_test" / "_meta.pt"
+                if meta_path.exists():
+                    meta = torch.load(meta_path, map_location="cpu", weights_only=False)
+                    preextracted_vit_dim = meta.get("d_vit")
+
             gmmlp_encoder = GMMLPImageEncoder(
                 model_id=gmmlp_model_id,
                 model_family=gmmlp_model_family,
@@ -213,34 +222,12 @@ class InferenceEngine:
                 num_media_embeds=gmmlp_num_media_embeds,
                 vision_chunk_size=gmmlp_vision_chunk_size,
                 temperature=0.07,
+                preextracted_vit_dim=preextracted_vit_dim,
             )
             ckpt = torch.load(gmmlp_checkpoint, map_location="cpu", weights_only=False)
             prefix = "model_image."
             encoder_state = {k[len(prefix):]: v for k, v in ckpt["model"].items() if k.startswith(prefix)}
             gmmlp_encoder.load_state_dict(encoder_state, strict=False)
-
-            if gmmlp_feat_cache:
-                # Swap to Perceiver-only encoder, freeing the ViT
-                vit_hidden = gmmlp_encoder.vit_hidden
-                light = GMMLPImageEncoder(
-                    model_id=gmmlp_model_id,
-                    model_family=gmmlp_model_family,
-                    lora_r=gmmlp_lora_r,
-                    lora_alpha=gmmlp_lora_alpha,
-                    lora_dropout=gmmlp_lora_dropout,
-                    num_latents=gmmlp_num_latents,
-                    num_media_embeds=gmmlp_num_media_embeds,
-                    vision_chunk_size=gmmlp_vision_chunk_size,
-                    temperature=0.07,
-                    preextracted_vit_dim=vit_hidden,
-                )
-                light.perceiver.load_state_dict(gmmlp_encoder.perceiver.state_dict())
-                light.cls_token.data.copy_(gmmlp_encoder.cls_token.data)
-                light.cls_attn.load_state_dict(gmmlp_encoder.cls_attn.state_dict())
-                del gmmlp_encoder
-                gc.collect()
-                torch.cuda.empty_cache()
-                gmmlp_encoder = light
 
         # ── MMSLT model ───────────────────────────────────────────────────
         self._on_status("Building model architecture…")
@@ -283,7 +270,7 @@ class InferenceEngine:
 
         # ── Dataset (test split, for ground truth + frame paths) ──────────
         self._on_status("Loading test annotations…")
-        self._gmmlp_feat_cache = Path(gmmlp_feat_cache) / "test" if gmmlp_feat_cache else None
+        self._gmmlp_feat_cache = Path(gmmlp_feat_cache) / "features_test" if gmmlp_feat_cache else None
         self._use_gmmlp = bool(gmmlp_encoder)
         self._load_test_data()
 
@@ -345,8 +332,10 @@ class InferenceEngine:
                     f"Expected: {pt_path}\n"
                     "Run with --preextract_gmmlp first."
                 )
-            vis_feats = torch.load(pt_path, weights_only=True)  # (T, D_vit)
-            return {"vis_feats": [vis_feats], "name_batch": [video.video_name]}
+            data = torch.load(pt_path, map_location="cpu", weights_only=False)
+            vis_feats = data["vis"] if isinstance(data, dict) else data  # (T, P, D) or (T, D)
+            return {"vis_feats": [vis_feats], "name_batch": [video.video_name],
+                    "src_length_batch": torch.tensor([len(vis_feats)])}
 
         # Scan video directory for frames (works for both GMMLP PIL and standard backbone)
         frame_dir = Path(self._img_root) / "test" / video.video_name
