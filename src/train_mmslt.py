@@ -13,6 +13,8 @@ import hpargparse
 import numpy as np
 import torch
 import wandb
+from accelerate import Accelerator
+from accelerate.utils import DistributedDataParallelKwargs
 import yaml
 from hpman.m import _
 from loguru import logger
@@ -390,10 +392,14 @@ def get_args_parser():
 
 
 def main(args, config) -> None:
-    args.distributed = False
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.accum_steps,
+        kwargs_handlers=[ddp_kwargs],
+    )
     print(args)
 
-    device = torch.device(args.device)
+    device = accelerator.device
 
     # fix the seed for reproducibility
     seed = args.seed
@@ -530,6 +536,7 @@ def main(args, config) -> None:
         language_decoder=args.language_decoder,
         gemma4_model_id=args.gemma4_model_id,
         gmmlp_encoder=gmmlp_encoder,
+        local_rank=accelerator.local_process_index,
     )
     if args.language_decoder == "gemma4":
         # Gemma4 LM is loaded with device_map="auto" + 4-bit bitsandbytes quantization,
@@ -592,6 +599,12 @@ def main(args, config) -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"output_dir: {output_dir}")
+
+    model, optimizer, train_dataloader = accelerator.prepare(
+        model, optimizer, train_dataloader
+    )
+    model_without_ddp = accelerator.unwrap_model(model)
+
     if args.resume:
         print("Resuming Model Parameters... ")
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
@@ -624,6 +637,7 @@ def main(args, config) -> None:
             PAD_IDX,
             device,
             fps=args.fps,
+            accelerator=accelerator,
         )
         print(
             f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} ",
@@ -641,6 +655,7 @@ def main(args, config) -> None:
             PAD_IDX,
             device,
             fps=args.fps,
+            accelerator=accelerator,
         )
         print(
             f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
@@ -668,14 +683,14 @@ def main(args, config) -> None:
             device,
             epoch,
             config,
+            accelerator=accelerator,
             output_dir=output_dir,
-            accum_steps=args.accum_steps,
         )
         if lr_scheduler is not None:
             lr_scheduler.step(epoch)
         train_peak_ram_gb = max(train_peak_ram_gb, train_stats.get("peak_ram_gb", 0.0))
 
-        if args.output_dir:
+        if args.output_dir and accelerator.is_main_process:
             checkpoint_paths = [
                 output_dir / "checkpoint.pth",
                 output_dir / f"checkpoint_epoch_{epoch:04d}.pth",
@@ -706,6 +721,7 @@ def main(args, config) -> None:
             PAD_IDX,
             device,
             fps=args.fps,
+            accelerator=accelerator,
         )
         print(
             f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
@@ -713,7 +729,7 @@ def main(args, config) -> None:
 
         if max_accuracy < test_stats["belu4"]:
             max_accuracy = test_stats["belu4"]
-            if args.output_dir:
+            if args.output_dir and accelerator.is_main_process:
                 state = {
                     "model": model_without_ddp.state_dict(),
                     "optimizer": optimizer.state_dict(),
@@ -736,21 +752,22 @@ def main(args, config) -> None:
                 torch.save(state, output_dir / "best_checkpoint.pth")
 
         print(f"Max BELU-4: {max_accuracy:.2f}%")
-        wandb.log(
-            {
-                "epoch": epoch + 1,
-                "training/train_loss": train_stats["loss"],
-                "dev/dev_loss": test_stats["loss"],
-                "dev/Bleu_1": test_stats.get("bleu1", 0.0),
-                "dev/Bleu_2": test_stats.get("bleu2", 0.0),
-                "dev/Bleu_3": test_stats.get("bleu3", 0.0),
-                "dev/Bleu_4": test_stats["belu4"],
-                "dev/Best_Bleu_4": max_accuracy,
-                "dev/ROUGE_L": test_stats.get("rouge_l", 0.0),
-                "dev/inference_time_per_video_s": test_stats.get("inference_time_per_video_s", 0.0),
-                "dev/inference_rtf": test_stats.get("inference_rtf", 0.0),
-            },
-        )
+        if accelerator.is_main_process:
+            wandb.log(
+                {
+                    "epoch": epoch + 1,
+                    "training/train_loss": train_stats["loss"],
+                    "dev/dev_loss": test_stats["loss"],
+                    "dev/Bleu_1": test_stats.get("bleu1", 0.0),
+                    "dev/Bleu_2": test_stats.get("bleu2", 0.0),
+                    "dev/Bleu_3": test_stats.get("bleu3", 0.0),
+                    "dev/Bleu_4": test_stats["belu4"],
+                    "dev/Best_Bleu_4": max_accuracy,
+                    "dev/ROUGE_L": test_stats.get("rouge_l", 0.0),
+                    "dev/inference_time_per_video_s": test_stats.get("inference_time_per_video_s", 0.0),
+                    "dev/inference_rtf": test_stats.get("inference_rtf", 0.0),
+                },
+            )
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
@@ -760,7 +777,7 @@ def main(args, config) -> None:
         if not args.skip_val:
             log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
 
-        if args.output_dir:
+        if args.output_dir and accelerator.is_main_process:
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
@@ -799,6 +816,7 @@ def main(args, config) -> None:
             PAD_IDX,
             device,
             fps=args.fps,
+            accelerator=accelerator,
         )
         print(
             f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
@@ -817,42 +835,47 @@ def main(args, config) -> None:
             PAD_IDX,
             device,
             fps=args.fps,
+            accelerator=accelerator,
         )
         print(
             f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
         )
 
         # Single-video memory benchmark (same video every run: test_data[0])
-        forced_bos_sv = (
-            None if args.language_decoder == "gemma4" else tokenizer.lang_code_to_id["de_DE"]
-        )
-        sv_src, _ = test_data.collate_fn([test_data[0]])
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats(device)
-        sv_ram_gb = psutil.Process(os.getpid()).memory_info().rss / (1024**3) if psutil else 0.0
-        with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            _ = model_without_ddp.generate(
-                sv_src,
-                max_new_tokens=150,
-                num_beams=8,
-                forced_bos_token_id=forced_bos_sv,
-                repetition_penalty=args.eval_repetition_penalty,
-                no_repeat_ngram_size=args.eval_no_repeat_ngram_size,
+        if accelerator.is_main_process:
+            forced_bos_sv = (
+                None if args.language_decoder == "gemma4" else tokenizer.lang_code_to_id["de_DE"]
             )
-        if torch.cuda.is_available():
-            torch.cuda.synchronize(device)
-        sv_peak_vram_gb = (
-            torch.cuda.max_memory_allocated(device) / (1024**3)
-            if torch.cuda.is_available()
-            else 0.0
-        )
-        print(
-            f"[memory/single-video] RAM at inference: {sv_ram_gb:.2f} GB  "
-            f"peak VRAM: {sv_peak_vram_gb:.2f} GB",
-        )
+            sv_src, _ = test_data.collate_fn([test_data[0]])
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats(device)
+            sv_ram_gb = psutil.Process(os.getpid()).memory_info().rss / (1024**3) if psutil else 0.0
+            with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                _ = model_without_ddp.generate(
+                    sv_src,
+                    max_new_tokens=150,
+                    num_beams=8,
+                    forced_bos_token_id=forced_bos_sv,
+                    repetition_penalty=args.eval_repetition_penalty,
+                    no_repeat_ngram_size=args.eval_no_repeat_ngram_size,
+                )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
+            sv_peak_vram_gb = (
+                torch.cuda.max_memory_allocated(device) / (1024**3)
+                if torch.cuda.is_available()
+                else 0.0
+            )
+            print(
+                f"[memory/single-video] RAM at inference: {sv_ram_gb:.2f} GB  "
+                f"peak VRAM: {sv_peak_vram_gb:.2f} GB",
+            )
+        else:
+            sv_ram_gb = 0.0
+            sv_peak_vram_gb = 0.0
 
         # Persist memory stats back into best checkpoint
-        if (output_dir / "best_checkpoint.pth").exists():
+        if (output_dir / "best_checkpoint.pth").exists() and accelerator.is_main_process:
             ckpt = torch.load(
                 output_dir / "best_checkpoint.pth",
                 map_location="cpu",
@@ -869,15 +892,16 @@ def main(args, config) -> None:
             )
             torch.save(ckpt, output_dir / "best_checkpoint.pth")
 
-        wandb.log(
-            {
-                "memory/train_peak_ram_gb": train_peak_ram_gb,
-                "memory/train_peak_vram_gb": train_peak_vram_gb,
-                "memory/single_video_ram_gb": sv_ram_gb,
-                "memory/single_video_peak_vram_gb": sv_peak_vram_gb,
-                "training/total_time_s": total_time,
-            },
-        )
+        if accelerator.is_main_process:
+            wandb.log(
+                {
+                    "memory/train_peak_ram_gb": train_peak_ram_gb,
+                    "memory/train_peak_vram_gb": train_peak_vram_gb,
+                    "memory/single_video_ram_gb": sv_ram_gb,
+                    "memory/single_video_peak_vram_gb": sv_peak_vram_gb,
+                    "training/total_time_s": total_time,
+                },
+            )
 
 
 def train_one_epoch(
@@ -889,10 +913,10 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     config,
+    accelerator,
     output_dir: Path | None = None,
     max_norm: float = 0,
     set_training_mode=True,
-    accum_steps: int = 1,
 ):
     model.train(set_training_mode)
 
@@ -903,7 +927,6 @@ def train_one_epoch(
 
     peak_ram_gb = 0.0
     n_batches = len(data_loader)
-    optimizer.zero_grad()
 
     for step, (src_input, tgt_input) in enumerate(
         tqdm(
@@ -911,24 +934,21 @@ def train_one_epoch(
             total=n_batches,
             desc=header,
             leave=False,
-            disable=not utils.is_main_process(),
+            disable=not accelerator.is_main_process,
         ),
     ):
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-            out_logits = model(src_input, tgt_input)
-            label = tgt_input["input_ids"].reshape(-1)
-            logits = out_logits.reshape(-1, out_logits.shape[-1])
-            ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
-            ce_loss = ce_loss / accum_steps
+        with accelerator.accumulate(model):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                out_logits = model(src_input, tgt_input)
+                label = tgt_input["input_ids"].reshape(-1)
+                logits = out_logits.reshape(-1, out_logits.shape[-1])
+                ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
 
-        ce_loss.backward()
-
-        is_last_batch = (step + 1 == n_batches)
-        if (step + 1) % accum_steps == 0 or is_last_batch:
+            accelerator.backward(ce_loss)
             optimizer.step()
             optimizer.zero_grad()
 
-        loss_value = ce_loss.item() * accum_steps  # log unscaled loss
+        loss_value = ce_loss.item()
 
         if psutil is not None:
             peak_ram_gb = max(
@@ -943,10 +963,10 @@ def train_one_epoch(
         if (step + 1) % 10 == 0 and args.visualize:
             utils.visualization(model.visualize())
 
-        if output_dir is not None and (step + 1) % 300 == 0:
+        if output_dir is not None and (step + 1) % 300 == 0 and accelerator.is_main_process:
             torch.save(
                 {
-                    "model": model.state_dict(),
+                    "model": accelerator.unwrap_model(model).state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "epoch": epoch,
                     "step": step,
@@ -981,6 +1001,7 @@ def evaluate(
     PAD_IDX,
     device,
     fps: float = 25.0,
+    accelerator=None,
 ):
     model.eval()
 
@@ -994,6 +1015,7 @@ def evaluate(
     num_videos = 0
     forced_bos = None if args.language_decoder == "gemma4" else tokenizer.lang_code_to_id["de_DE"]
 
+    _is_main = accelerator.is_main_process if accelerator is not None else utils.is_main_process()
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
             tqdm(
@@ -1001,7 +1023,7 @@ def evaluate(
                 total=len(dev_dataloader),
                 desc=header,
                 leave=False,
-                disable=not utils.is_main_process(),
+                disable=not _is_main,
             ),
         ):
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
@@ -1035,7 +1057,7 @@ def evaluate(
             tgt_pres.extend(pred_texts)
             tgt_refs.extend(ref_texts)
 
-            if args.log_memory and utils.is_main_process() and ((step + 1) % 20 == 0):
+            if args.log_memory and _is_main and ((step + 1) % 20 == 0):
                 rss_gb = "N/A"
                 if psutil is not None:
                     rss_gb = f"{psutil.Process(os.getpid()).memory_info().rss / (1024**3):.2f} GB"
@@ -1048,7 +1070,7 @@ def evaluate(
                 else:
                     print(f"[memory] step={step + 1} rss={rss_gb}")
 
-            if (step + 1) % 10 == 0 and args.visualize and utils.is_main_process():
+            if (step + 1) % 10 == 0 and args.visualize and _is_main:
                 utils.visualization(model_without_ddp.visualize())
 
             if args.debug and step >= 1:

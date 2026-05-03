@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export CUDA_VISIBLE_DEVICES=0
+NUM_GPUS=2  # Set to 1 or 2
+
+if [[ "${NUM_GPUS}" -ge 2 ]]; then
+  export CUDA_VISIBLE_DEVICES=0,1
+else
+  export CUDA_VISIBLE_DEVICES=0
+fi
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ulimit -n 65536  # prevent "Too many open files" from DataLoader tensor fd sharing
 source "$(dirname "$0")/slib/monitor_cmd.bash"
@@ -13,7 +19,7 @@ VISION_BACKBONE="resnet18"
 CONFIG="src/configs/config_mmslt_phoenix.yaml"
 OUTPUT_DIR="out/mmslt"
 SKIP_VAL="false"
-EVAL_EVERY=5  # run dev evaluation every N epochs
+EVAL_EVERY=3  # run dev evaluation every N epochs
 EVAL_MAX_NEW_TOKENS=80  # Phoenix avg translation ~10 words; 80 is generous
 EVAL_NUM_BEAMS=4        # ignored for gemma4 (greedy), used for mbart
 # Set to true to pass --eval-metrics (extra BLEU-1/2/3 and ROUGE during evaluation).
@@ -81,14 +87,20 @@ if [[ -n "${TEST_CHECKPOINT}" ]]; then
   EXTRA_ARGS+=(--eval --resume "${TEST_CHECKPOINT}")
 fi
 
-monitor_cmd "train_mmslt" "${OUTPUT_DIR}" python src/train_mmslt.py \
+if [[ "${NUM_GPUS}" -ge 2 ]]; then
+  LAUNCH=(accelerate launch --num_processes "${NUM_GPUS}")
+else
+  LAUNCH=(python)
+fi
+
+monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
   --batch-size 4 \
   --accum-steps 4 \
   --gradient-checkpointing \
-  --epochs 50 \
+  --epochs 100 \
   --opt adamw \
   --lr 5e-4 \
-  --weight-decay 0.001 \
+  --weight-decay 0.05 \
   --warmup-epochs 0 \
   --config "${CONFIG}" \
   --vision_backbone "${VISION_BACKBONE}" \
@@ -103,4 +115,5 @@ monitor_cmd "train_mmslt" "${OUTPUT_DIR}" python src/train_mmslt.py \
   "${DECODER_ARGS[@]}" \
   "${GMMLP_ARGS[@]+"${GMMLP_ARGS[@]}"}" \
   "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
-  "${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}"
+  "${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}" \
+  "$@"

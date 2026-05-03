@@ -192,6 +192,7 @@ class MMSLT(nn.Module):
         language_decoder="mbart",
         gemma4_model_id="google/gemma-4-E2B-it",
         gmmlp_encoder=None,
+        local_rank=0,
     ) -> None:
         super().__init__()
         self.config = config
@@ -208,7 +209,7 @@ class MMSLT(nn.Module):
             self.gemma4 = Gemma4ForConditionalGeneration.from_pretrained(
                 gemma4_model_id,
                 quantization_config=quant_config,
-                device_map={"": 0},
+                device_map={"": local_rank},
                 low_cpu_mem_usage=True,
             )
             self.gemma4.generation_config.max_length = None
