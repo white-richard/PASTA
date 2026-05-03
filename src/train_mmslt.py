@@ -1,6 +1,5 @@
 import argparse
 import datetime
-import gc
 import json
 import os
 import random
@@ -48,7 +47,7 @@ except ImportError:
 
 def get_args_parser():
     parser = argparse.ArgumentParser(
-        "LLaVA-guided Sign Language Translation script",
+        "Sign Language Translation script",
         add_help=False,
     )
     parser.add_argument("--batch-size", default=16, type=int)
@@ -233,6 +232,18 @@ def get_args_parser():
         metavar="N",
         help="Beam width for mbart generation during evaluation (default: 4; ignored for gemma4 greedy).",
     )
+    parser.add_argument(
+        "--eval-repetition-penalty",
+        type=float,
+        default=1.3,
+        help="Repetition penalty for gemma4 greedy decoding (default: 1.3; 1.0 = disabled).",
+    )
+    parser.add_argument(
+        "--eval-no-repeat-ngram-size",
+        type=int,
+        default=4,
+        help="Block repeated n-grams of this size during gemma4 decoding (default: 4; 0 = disabled).",
+    )
 
     parser.add_argument("--num_workers", default=4, type=int)
     parser.add_argument(
@@ -346,10 +357,16 @@ def get_args_parser():
     parser.add_argument(
         "--gmmlp_feat_cache",
         default="",
-        help="Directory of pre-extracted GMMLP ViT features produced by extract_vision_feats.py. "
-        "Each video must be saved as {cache}/{split}/{video_name}.pt containing a "
-        "(T, P, D_vit) patch tensor. When set, the ViT is not loaded and only the "
-        "Perceiver runs during training.",
+        help="Root directory of pre-extracted GMMLP ViT features produced by extract_vision_feats.py. "
+        "Contains features_{split}[_spatial{n}tok]/ subdirectories with per-video .pt files. "
+        "When set, the ViT is not loaded and only the Perceiver runs during training.",
+    )
+    parser.add_argument(
+        "--gmmlp_n_tokens",
+        type=int,
+        default=0,
+        help="Number of spatial patch tokens per frame (from pool_patches_spatial.py). "
+        "Selects features_{split}_spatial{n}tok/ subdirectory. 0 = raw features_{split}/.",
     )
     parser.add_argument(
         "--fps",
@@ -357,10 +374,19 @@ def get_args_parser():
         default=25.0,
         help="Nominal video frame rate used to convert frame counts to seconds for timing metrics.",
     )
+    parser.add_argument(
+        "--accum-steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps. Effective batch = batch-size × accum-steps (default: 1).",
+    )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing on Gemma4 to reduce VRAM at the cost of ~20%% recompute.",
+    )
 
     return parser
-
-
 
 
 def main(args, config) -> None:
@@ -397,6 +423,7 @@ def main(args, config) -> None:
         "args": args,
         "use_gmmlp_backbone": use_gmmlp_backbone,
         "gmmlp_feat_cache": args.gmmlp_feat_cache or None,
+        "gmmlp_n_tokens": args.gmmlp_n_tokens,
     }
 
     train_data = S2T_Dataset(phase="train", **dataset_kwargs)
@@ -456,6 +483,20 @@ def main(args, config) -> None:
         print(f"Loading GMMLP encoder from {args.gmmlp_checkpoint} …")
         from train_gmmlp import GMMLPImageEncoder
 
+        # When a feature cache is available, read D_vit from its metadata so we
+        # can build a Perceiver-only encoder
+        preextracted_vit_dim: int | None = None
+        if args.gmmlp_feat_cache:
+            split_name = (
+                f"features_train_spatial{args.gmmlp_n_tokens}tok"
+                if args.gmmlp_n_tokens
+                else "features_train"
+            )
+            meta_path = Path(args.gmmlp_feat_cache) / split_name / "_meta.pt"
+            meta = torch.load(meta_path, map_location="cpu", weights_only=False)
+            preextracted_vit_dim = meta["d_vit"]
+            print(f"  Perceiver-only mode: D_vit={preextracted_vit_dim} (ViT not loaded)")
+
         gmmlp_encoder = GMMLPImageEncoder(
             model_id=args.gmmlp_model_id,
             model_family=args.gmmlp_model_family,
@@ -466,6 +507,7 @@ def main(args, config) -> None:
             num_media_embeds=args.gmmlp_num_media_embeds,
             vision_chunk_size=args.gmmlp_vision_chunk_size,
             temperature=0.07,
+            preextracted_vit_dim=preextracted_vit_dim,
         )
         ckpt = torch.load(args.gmmlp_checkpoint, map_location="cpu", weights_only=False)
         prefix = "model_image."
@@ -480,31 +522,6 @@ def main(args, config) -> None:
         print(
             f"Loaded GMMLP encoder (D_vit={gmmlp_encoder.vit_hidden}, K={gmmlp_encoder.num_latents})",
         )
-
-        if args.gmmlp_feat_cache:
-            # ViT no longer needed — swap to a Perceiver-only encoder to free GPU memory
-            # before loading the Gemma4 LM.
-            vit_hidden = gmmlp_encoder.vit_hidden
-            light = GMMLPImageEncoder(
-                model_id=args.gmmlp_model_id,
-                model_family=args.gmmlp_model_family,
-                lora_r=args.gmmlp_lora_r,
-                lora_alpha=args.gmmlp_lora_alpha,
-                lora_dropout=args.gmmlp_lora_dropout,
-                num_latents=args.gmmlp_num_latents,
-                num_media_embeds=args.gmmlp_num_media_embeds,
-                vision_chunk_size=args.gmmlp_vision_chunk_size,
-                temperature=0.07,
-                preextracted_vit_dim=vit_hidden,
-            )
-            light.perceiver.load_state_dict(gmmlp_encoder.perceiver.state_dict())
-            light.cls_token.data.copy_(gmmlp_encoder.cls_token.data)
-            light.cls_attn.load_state_dict(gmmlp_encoder.cls_attn.state_dict())
-            del gmmlp_encoder
-            gc.collect()
-            torch.cuda.empty_cache()
-            gmmlp_encoder = light
-            print(f"Switched to Perceiver-only encoder (D_vit={vit_hidden}), ViT freed.")
 
     model = MMSLT(
         config,
@@ -522,6 +539,14 @@ def main(args, config) -> None:
                 module.to(device)
     else:
         model.to(device)
+
+    if args.language_decoder == "gemma4" and args.gradient_checkpointing:
+        # enable_input_require_grads is required for PEFT gradient flow with checkpointing.
+        model.gemma4.enable_input_require_grads()
+        model.gemma4.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        print("Gradient checkpointing enabled for Gemma4.")
 
     if args.finetune:
         print("***********************************")
@@ -559,7 +584,7 @@ def main(args, config) -> None:
 
     lr_scheduler = scheduler.CosineAnnealingLR(
         optimizer=optimizer,
-        eta_min=args.lr*0.1,
+        eta_min=args.lr * 0.08,
         T_max=args.epochs,
     )
     ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
@@ -569,7 +594,7 @@ def main(args, config) -> None:
     print(f"output_dir: {output_dir}")
     if args.resume:
         print("Resuming Model Parameters... ")
-        checkpoint = torch.load(args.resume, map_location="cpu")
+        checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
         if not args.eval and "optimizer" in checkpoint and "epoch" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
@@ -643,6 +668,8 @@ def main(args, config) -> None:
             device,
             epoch,
             config,
+            output_dir=output_dir,
+            accum_steps=args.accum_steps,
         )
         if lr_scheduler is not None:
             lr_scheduler.step(epoch)
@@ -746,7 +773,7 @@ def main(args, config) -> None:
     )
     print(
         f"[memory/training] peak RAM: {train_peak_ram_gb:.2f} GB  "
-        f"peak VRAM: {train_peak_vram_gb:.2f} GB"
+        f"peak VRAM: {train_peak_vram_gb:.2f} GB",
     )
 
     # Last epoch: load best checkpoint, evaluate, and run single-video memory benchmark
@@ -797,9 +824,7 @@ def main(args, config) -> None:
 
         # Single-video memory benchmark (same video every run: test_data[0])
         forced_bos_sv = (
-            None
-            if args.language_decoder == "gemma4"
-            else tokenizer.lang_code_to_id["de_DE"]
+            None if args.language_decoder == "gemma4" else tokenizer.lang_code_to_id["de_DE"]
         )
         sv_src, _ = test_data.collate_fn([test_data[0]])
         if torch.cuda.is_available():
@@ -811,20 +836,28 @@ def main(args, config) -> None:
                 max_new_tokens=150,
                 num_beams=8,
                 forced_bos_token_id=forced_bos_sv,
+                repetition_penalty=args.eval_repetition_penalty,
+                no_repeat_ngram_size=args.eval_no_repeat_ngram_size,
             )
         if torch.cuda.is_available():
             torch.cuda.synchronize(device)
         sv_peak_vram_gb = (
-            torch.cuda.max_memory_allocated(device) / (1024**3) if torch.cuda.is_available() else 0.0
+            torch.cuda.max_memory_allocated(device) / (1024**3)
+            if torch.cuda.is_available()
+            else 0.0
         )
         print(
             f"[memory/single-video] RAM at inference: {sv_ram_gb:.2f} GB  "
-            f"peak VRAM: {sv_peak_vram_gb:.2f} GB"
+            f"peak VRAM: {sv_peak_vram_gb:.2f} GB",
         )
 
         # Persist memory stats back into best checkpoint
         if (output_dir / "best_checkpoint.pth").exists():
-            ckpt = torch.load(output_dir / "best_checkpoint.pth", map_location="cpu", weights_only=False)
+            ckpt = torch.load(
+                output_dir / "best_checkpoint.pth",
+                map_location="cpu",
+                weights_only=False,
+            )
             ckpt.setdefault("metrics", {}).update(
                 {
                     "total_train_time_s": total_time,
@@ -832,7 +865,7 @@ def main(args, config) -> None:
                     "train_peak_vram_gb": train_peak_vram_gb,
                     "single_video_ram_gb": sv_ram_gb,
                     "single_video_peak_vram_gb": sv_peak_vram_gb,
-                }
+                },
             )
             torch.save(ckpt, output_dir / "best_checkpoint.pth")
 
@@ -843,7 +876,7 @@ def main(args, config) -> None:
                 "memory/single_video_ram_gb": sv_ram_gb,
                 "memory/single_video_peak_vram_gb": sv_peak_vram_gb,
                 "training/total_time_s": total_time,
-            }
+            },
         )
 
 
@@ -856,8 +889,10 @@ def train_one_epoch(
     device: torch.device,
     epoch: int,
     config,
+    output_dir: Path | None = None,
     max_norm: float = 0,
     set_training_mode=True,
+    accum_steps: int = 1,
 ):
     model.train(set_training_mode)
 
@@ -867,11 +902,13 @@ def train_one_epoch(
     print_freq = 10
 
     peak_ram_gb = 0.0
+    n_batches = len(data_loader)
+    optimizer.zero_grad()
 
     for step, (src_input, tgt_input) in enumerate(
         tqdm(
             metric_logger.log_every(data_loader, print_freq, header),
-            total=len(data_loader),
+            total=n_batches,
             desc=header,
             leave=False,
             disable=not utils.is_main_process(),
@@ -882,15 +919,22 @@ def train_one_epoch(
             label = tgt_input["input_ids"].reshape(-1)
             logits = out_logits.reshape(-1, out_logits.shape[-1])
             ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
+            ce_loss = ce_loss / accum_steps
 
-        optimizer.zero_grad()
         ce_loss.backward()
-        optimizer.step()
 
-        loss_value = ce_loss.item()
+        is_last_batch = (step + 1 == n_batches)
+        if (step + 1) % accum_steps == 0 or is_last_batch:
+            optimizer.step()
+            optimizer.zero_grad()
+
+        loss_value = ce_loss.item() * accum_steps  # log unscaled loss
 
         if psutil is not None:
-            peak_ram_gb = max(peak_ram_gb, psutil.Process(os.getpid()).memory_info().rss / (1024**3))
+            peak_ram_gb = max(
+                peak_ram_gb,
+                psutil.Process(os.getpid()).memory_info().rss / (1024**3),
+            )
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -898,6 +942,17 @@ def train_one_epoch(
 
         if (step + 1) % 10 == 0 and args.visualize:
             utils.visualization(model.visualize())
+
+        if output_dir is not None and (step + 1) % 300 == 0:
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch,
+                    "step": step,
+                },
+                output_dir / "checkpoint_mid_epoch.pth",
+            )
 
         if args.debug and step >= 1:
             print("*** DEBUG MODE: stopping after 2 batches ***")
@@ -937,11 +992,7 @@ def evaluate(
     total_gen_time = 0.0
     total_video_frames = 0
     num_videos = 0
-    forced_bos = (
-        None
-        if args.language_decoder == "gemma4"
-        else tokenizer.lang_code_to_id["de_DE"]
-    )
+    forced_bos = None if args.language_decoder == "gemma4" else tokenizer.lang_code_to_id["de_DE"]
 
     with torch.no_grad():
         for step, (src_input, tgt_input) in enumerate(
@@ -969,6 +1020,8 @@ def evaluate(
                     max_new_tokens=args.eval_max_new_tokens,
                     num_beams=args.eval_num_beams,
                     forced_bos_token_id=forced_bos,
+                    repetition_penalty=args.eval_repetition_penalty,
+                    no_repeat_ngram_size=args.eval_no_repeat_ngram_size,
                 )
             if torch.cuda.is_available():
                 torch.cuda.synchronize(device)
@@ -1014,7 +1067,7 @@ def evaluate(
     rouge_l = (
         sum(
             _rouge_scorer.score(ref, pred)["rougeL"].fmeasure
-            for ref, pred in zip(tgt_refs, tgt_pres)
+            for ref, pred in zip(tgt_refs, tgt_pres, strict=False)
         )
         / len(tgt_pres)
         * 100
@@ -1069,10 +1122,10 @@ def evaluate(
         f"{bleu_scores['bleu3']:.2f}/{bleu_scores['bleu4']:.2f}  "
         f"ROUGE-L: {rouge_l:.2f}  "
         f"loss: {metric_logger.loss.global_avg:.3f}  "
-        f"gen: {avg_time_per_video:.3f}s/video  rtf: {inference_rtf:.3f}s/s"
+        f"gen: {avg_time_per_video:.3f}s/video  rtf: {inference_rtf:.3f}s/s",
     )
 
-    if args.eval:
+    if args.eval and compute_metrics is not None:
         with open(args.output_dir + "/tmp_pres.txt", "w") as f:
             f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
         with open(args.output_dir + "/tmp_refs.txt", "w") as f:
