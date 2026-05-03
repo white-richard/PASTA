@@ -179,7 +179,7 @@ class MetricLogger:
 def count_parameters_in_MB(model):
     # sum(p.numel() for p in model.parameters() if p.requires_grad)
     return (
-        np.sum(np.prod(v.size()) for name, v in model.named_parameters() if v.requires_grad) / 1e6
+        sum(np.prod(v.size()) for name, v in model.named_parameters() if v.requires_grad) / 1e6
     )
 
 

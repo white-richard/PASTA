@@ -25,7 +25,7 @@ TEST_CHECKPOINT=""
 # Optional: path to a pretrained GMMLP checkpoint (from train_gmmlp.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
-GMMLP_CHECKPOINT="out/gmmlp/checkpoint_epoch_99_devloss_3p4993.pth"
+GMMLP_CHECKPOINT="checkpoint_epoch_339_devloss_3p3497.pth"
 # Architecture must match the checkpoint produced by train_gmmlp.bash.
 GMMLP_MODEL_ID="google/gemma-4-E2B-it"
 GMMLP_MODEL_FAMILY="gemma4"
@@ -92,7 +92,7 @@ monitor_cmd "train_mmslt" "${OUTPUT_DIR}" python src/train_mmslt.py \
   --warmup-epochs 0 \
   --config "${CONFIG}" \
   --vision_backbone "${VISION_BACKBONE}" \
-  --gmmlp_feat_cache "out/phoenix-vision_feats/A4B_features" \
+  --gmmlp_feat_cache "datasets/phoenix-vision_feats/A4B_features" \
   --gmmlp_n_tokens 0 \
   --output_dir "${OUTPUT_DIR}" \
   --num_workers 8 \
