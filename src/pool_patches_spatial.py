@@ -68,6 +68,47 @@ def spatial_pool(vis: torch.Tensor, n_tokens: int) -> torch.Tensor:
 
 
 def pool_file(input_path: pathlib.Path, n_tokens: int) -> None:
+    if input_path.is_dir():
+        _pool_dir(input_path, n_tokens)
+    else:
+        _pool_single_file(input_path, n_tokens)
+
+
+def _pool_dir(src_dir: pathlib.Path, n_tokens: int) -> None:
+    """Pool all per-video files in a per-video directory (output of extract_vision_feats.py)."""
+    meta = torch.load(src_dir / "_meta.pt", map_location="cpu", weights_only=False)
+    feature_mode = meta.get("feature_mode", "gap")
+    if feature_mode == "gap":
+        print(f"  [skip] feature_mode=gap — no patch dimension to pool in {src_dir.name}")
+        return
+
+    actual_tokens: int | None = None
+    out_dir: pathlib.Path | None = None
+
+    for vid in tqdm(meta["vids"], desc=f"{n_tokens}tok"):
+        data = torch.load(src_dir / f"{vid}.pt", map_location="cpu", weights_only=False)
+        vis = data["vis"]
+        if vis.dim() == 2:
+            print(f"  [warn] {vid}: 2-D tensor in non-gap dir, skipping")
+            continue
+        pooled = spatial_pool(vis, n_tokens)
+        if actual_tokens is None:
+            actual_tokens = pooled.shape[1]
+            H_out, W_out = _best_factors(actual_tokens)
+            print(f"  grid: {vis.shape[1]} → {actual_tokens} patches ({H_out}×{W_out})")
+            out_dir = src_dir.parent / f"{src_dir.name}_spatial{actual_tokens}tok"
+            out_dir.mkdir(exist_ok=True)
+        torch.save({"vis": pooled}, out_dir / f"{vid}.pt")
+
+    n = actual_tokens if actual_tokens is not None else n_tokens
+    if out_dir is None:
+        out_dir = src_dir.parent / f"{src_dir.name}_spatial{n}tok"
+        out_dir.mkdir(exist_ok=True)
+    torch.save({**meta, "feature_mode": f"spatial_{n}tok", "n_tokens": n}, out_dir / "_meta.pt")
+    print(f"Saved → {out_dir}  (tokens/frame={n}, D={meta.get('d_vit')})")
+
+
+def _pool_single_file(input_path: pathlib.Path, n_tokens: int) -> None:
     print(f"Loading {input_path} (target {n_tokens} tokens/frame)...")
     data = torch.load(input_path, map_location="cpu", weights_only=False)
 
@@ -110,7 +151,7 @@ def main() -> None:
         "--input",
         nargs="+",
         required=True,
-        help="One or more features_*.pt files to pool.",
+        help="One or more features_* .pt files or per-video directories to pool.",
     )
     p.add_argument(
         "--n-tokens",
