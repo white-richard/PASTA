@@ -44,6 +44,31 @@ from grad_cache_util import (
 from load_descript_features import load_descript_features
 
 
+class LazyFeatureDir:
+    """Lazy per-video loader that mimics a {vid: {"vis": tensor}} dict interface.
+
+    Backed by a directory of per-video .pt files produced by extract_vision_feats.py
+    or pool_patches_spatial.py.  Keeps a set of known video IDs for fast membership
+    tests; the actual tensor is only read from disk when __getitem__ is called.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        meta = torch.load(self.root / "_meta.pt", map_location="cpu", weights_only=False)
+        self._vids: set[str] = set(meta.get("vids", []))
+        self.d_vit: int | None = meta.get("d_vit")
+        self.feature_mode: str | None = meta.get("feature_mode")
+
+    def __contains__(self, vid: object) -> bool:
+        return vid in self._vids
+
+    def __getitem__(self, vid: str) -> dict:
+        return torch.load(self.root / f"{vid}.pt", map_location="cpu", weights_only=False)
+
+    def __len__(self) -> int:
+        return len(self._vids)
+
+
 def load_siglip_features(path: str | Path) -> dict[str, torch.Tensor]:
     """Load SigLIP text token features.
 
@@ -634,7 +659,7 @@ def get_args_parser():
     parser.add_argument("--lr-noise-pct", type=float, default=0.67)
     parser.add_argument("--lr-noise-std", type=float, default=1.0)
     parser.add_argument("--warmup-lr", type=float, default=1e-6, metavar="LR")
-    parser.add_argument("--min-lr", type=float, default=1e-8, metavar="LR")
+    parser.add_argument("--min-lr", type=float, default=4e-5, metavar="LR")
     parser.add_argument("--decay-epochs", type=float, default=30, metavar="N")
     parser.add_argument("--warmup-epochs", type=int, default=2, metavar="N")
     parser.add_argument("--cooldown-epochs", type=int, default=5, metavar="N")
@@ -762,23 +787,23 @@ def get_args_parser():
         help="Path to siglip2 text features .pt for test split (default: translation embeddings).",
     )
 
-    # Pre-extracted ViT features (from extract_gmmlp_features.py)
+    # Pre-extracted ViT features (from extract_vision_feats.py + pool_patches_spatial.py)
     parser.add_argument(
         "--preextracted_feat_dir",
         type=str,
         default="out/phoenix-vision_feats/A4B_features",
         help=(
-            "Directory containing features_{split}[_spatial{n}tok].pt files. "
+            "Directory containing features_{split}[_spatial{n}tok]/ per-video subdirectories. "
             "When set, the ViT is bypassed during training and only the Perceiver is trained."
         ),
     )
     parser.add_argument(
         "--n-tokens",
         type=int,
-        default=64,
+        default=49,
         help=(
-            "Number of spatial patch tokens per frame to load (from pool_patches_spatial.py output). "
-            "Loads features_{split}_spatial{n}tok.pt. Set to 0 to load raw features_{split}.pt."
+            "Number of spatial patch tokens per frame (from pool_patches_spatial.py). "
+            "Loads features_{split}_spatial{n}tok/. Set to 0 to load raw features_{split}/."
         ),
     )
 
@@ -963,14 +988,19 @@ def main(args, config) -> None:
     }
     if args.preextracted_feat_dir:
         feat_dir = Path(args.preextracted_feat_dir)
-        print(f"Loading pre-extracted ViT features from {feat_dir} …")
+        print(f"Using pre-extracted ViT features from {feat_dir} …")
         for split in ["train", "dev", "test"]:
             if args.n_tokens:
-                p = feat_dir / f"features_{split}_spatial{args.n_tokens}tok.pt"
+                p = feat_dir / f"features_{split}_spatial{args.n_tokens}tok"
             else:
-                p = feat_dir / f"features_{split}.pt"
-            vis_proj_by_split[split] = torch.load(p, map_location="cpu", weights_only=False)
-            print(f"  [{split}] loaded {len(vis_proj_by_split[split])} videos")
+                p = feat_dir / f"features_{split}"
+            if p.is_dir():
+                vis_proj_by_split[split] = LazyFeatureDir(p)
+            else:
+                # Fallback: old single-file format.
+                pt = p.with_suffix(".pt")
+                vis_proj_by_split[split] = torch.load(pt, map_location="cpu", weights_only=False)
+            print(f"  [{split}] {len(vis_proj_by_split[split])} videos")
 
     print("Creating datasets …")
 
@@ -1037,13 +1067,16 @@ def main(args, config) -> None:
     preextracted_vit_dim: int | None = None
     if args.preextracted_feat_dir:
         train_feats = vis_proj_by_split["train"]
-        meta = train_feats.get("_meta", {})
-        if "d_vit" in meta:
-            preextracted_vit_dim = meta["d_vit"]
+        if isinstance(train_feats, LazyFeatureDir):
+            preextracted_vit_dim = train_feats.d_vit
         else:
-            # Fall back: infer from first video's vis tensor.
-            first_vid = next(v for k, v in train_feats.items() if k != "_meta")
-            preextracted_vit_dim = first_vid["vis"].shape[-1]
+            # Old single-file dict format.
+            meta = train_feats.get("_meta", {})
+            if "d_vit" in meta:
+                preextracted_vit_dim = meta["d_vit"]
+            else:
+                first_vid = next(v for k, v in train_feats.items() if k != "_meta")
+                preextracted_vit_dim = first_vid["vis"].shape[-1]
         print(f"Pre-extracted mode: D_vit={preextracted_vit_dim}, ViT not loaded.")
 
     model = GMMLP(
@@ -1054,7 +1087,7 @@ def main(args, config) -> None:
     ).to(device)
 
     if args.finetune:
-        ckpt = torch.load(args.finetune, map_location="cpu")
+        ckpt = torch.load(args.finetune, map_location="cpu", weights_only=False)
         ret = model.load_state_dict(ckpt["model"], strict=False)
         print("Missing keys:\n", "\n".join(ret.missing_keys))
         print("Unexpected keys:\n", "\n".join(ret.unexpected_keys))
@@ -1111,7 +1144,7 @@ def main(args, config) -> None:
         del train_loader
         log_memory(args, f"epoch_{epoch}_after_train")
         if lr_scheduler is not None:
-            lr_scheduler.step(epoch)
+            lr_scheduler.step(epoch + 1)
 
         if args.output_dir:
             checkpoint = {
@@ -1204,7 +1237,7 @@ def main(args, config) -> None:
 
     # Final eval on best checkpoint
     if args.output_dir and not args.skip_validation:
-        ckpt = torch.load(str(output_dir / "best_checkpoint.pth"), map_location="cpu")
+        ckpt = torch.load(str(output_dir / "best_checkpoint.pth"), map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"], strict=True)
         for split, loader in [("dev", dev_loader), ("test", test_loader)]:
             stats = evaluate(args, loader, model, epoch, device)
