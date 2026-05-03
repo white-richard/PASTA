@@ -274,7 +274,7 @@ class _GroundingAuxWrapper(DictInputWrapper):
         sentence_emb, student_vid = out
         sentence_emb = sentence_emb + 0.0 * self.dummy.sum()
 
-        if torch.is_grad_enabled():
+        if torch.is_grad_enabled() and "grounding_feats" in kwargs:
             device, dtype = student_vid.device, student_vid.dtype
             teacher = F.normalize(
                 kwargs["grounding_feats"].to(device, dtype=dtype), dim=-1
