@@ -28,10 +28,10 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
     --batch-size 64 \
     --epochs 100 \
     --opt adamw \
-    --lr 1e-4 \
-    --min-lr 5e-6 \
+    --lr 3e-3 \
+    --min-lr 5e-5 \
     --weight-decay 0.05 \
-    --warmup-epochs 0 \
+    --warmup-epochs 7 \
     --finetune "" \
     --output_dir out/gmmlp \
     --model_id "google/gemma-4-E2B-it" \
