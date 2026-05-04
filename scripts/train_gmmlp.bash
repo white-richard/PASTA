@@ -6,7 +6,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$(dirname "$0")/slib/monitor_cmd.bash"
 
 # Pre-extracted ViT features (set to "" to use live ViT + LoRA + grounding instead)
-PREEXTRACTED_DIR="out/phoenix-vision_feats/A4B_features"
+PREEXTRACTED_DIR="datasets/phoenix-vision_feats/A4B_features"
 N_TOKENS=0 # tokens/frame from pool_patches_spatial.py (7×7 from 7×9 grid); 0 = raw 63 patches
 # Translation token features for FILIP text side
 TRANSLATION_DIR="datasets/phoenix-translations"
@@ -14,7 +14,7 @@ SIGLIP_TRAIN="${TRANSLATION_DIR}/phoenix_translations_siglip2_train.pt"
 SIGLIP_DEV="${TRANSLATION_DIR}/phoenix_translations_siglip2_dev.pt"
 SIGLIP_TEST="${TRANSLATION_DIR}/phoenix_translations_siglip2_test.pt"
 # Grounding features — only used when PREEXTRACTED_DIR is empty
-GROUNDING_DIR="datasets/phoenix-descript/hidden_states_gemma_4_26B_A4B_it_GGUF"
+GROUNDING_DIR=""
 GROUNDING_LAYER=20
 # Set to any non-empty value to skip validation
 SKIP_VALIDATION=""
@@ -32,7 +32,7 @@ monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
     --min-lr 5e-6 \
     --weight-decay 0.05 \
     --warmup-epochs 0 \
-    --finetune "out/gmmlp/checkpoint_epoch_108_devloss_3p4252.pth" \
+    --finetune "" \
     --output_dir out/gmmlp \
     --model_id "google/gemma-4-E2B-it" \
     --model_family gemma4 \
