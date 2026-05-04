@@ -15,21 +15,23 @@ monitor_cmd() {
   local stderr_log="${memlog_dir}/${label}.stderr.log"
   local summary_log="${memlog_dir}/${label}.summary.txt"
   local pid_log="${memlog_dir}/${label}.pid"
-  local fifo_path="${memlog_dir}/${label}.fifo"
 
-  rm -f "${fifo_path}"
-  mkfifo "${fifo_path}"
-
+  # Write directly to the log file instead of through a FIFO.  A FIFO
+  # requires a live reader process; if the reader is killed (e.g. by
+  # accelerate/torchrun killing the process group on worker failure) the
+  # write end gets SIGPIPE and output is lost.  Direct >> is not
+  # susceptible to this and survives process-group signals.
   (
-    "$@" >"${fifo_path}" 2>&1
-  ) &
+    "$@" 2>&1
+  ) >>"${stdout_log}" &
   local cmd_pid=$!
 
   echo "${cmd_pid}" >"${pid_log}"
 
-  # Stream output to terminal and also capture it in the log file.
-  tee "${stdout_log}" <"${fifo_path}" &
-  local tee_pid=$!
+  # Show live output on the terminal.  This process is expendable: if it
+  # dies (SSH disconnect, terminal close) the training is unaffected.
+  tail -f "${stdout_log}" &
+  local tail_pid=$!
 
   local max_rss_kb=0
   local max_vram_mb=0
@@ -53,8 +55,8 @@ monitor_cmd() {
   wait "${cmd_pid}"
   local exit_code=$?
 
-  wait "${tee_pid}" || true
-  rm -f "${fifo_path}"
+  kill "${tail_pid}" 2>/dev/null || true
+  wait "${tail_pid}" 2>/dev/null || true
 
   {
     echo "label=${label}"

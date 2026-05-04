@@ -13,9 +13,9 @@ import hpargparse
 import numpy as np
 import torch
 import wandb
+import yaml
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
-import yaml
 from hpman.m import _
 from loguru import logger
 from rouge_score import rouge_scorer as _rouge_module
@@ -551,7 +551,7 @@ def main(args, config) -> None:
         # enable_input_require_grads is required for PEFT gradient flow with checkpointing.
         model.gemma4.enable_input_require_grads()
         model.gemma4.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
+            gradient_checkpointing_kwargs={"use_reentrant": False},
         )
         print("Gradient checkpointing enabled for Gemma4.")
 
@@ -601,7 +601,9 @@ def main(args, config) -> None:
     print(f"output_dir: {output_dir}")
 
     model, optimizer, train_dataloader = accelerator.prepare(
-        model, optimizer, train_dataloader
+        model,
+        optimizer,
+        train_dataloader,
     )
     model_without_ddp = accelerator.unwrap_model(model)
 
@@ -690,91 +692,121 @@ def main(args, config) -> None:
             lr_scheduler.step(epoch)
         train_peak_ram_gb = max(train_peak_ram_gb, train_stats.get("peak_ram_gb", 0.0))
 
+        state = None
         if args.output_dir and accelerator.is_main_process:
-            checkpoint_paths = [
-                output_dir / "checkpoint.pth",
-                output_dir / f"checkpoint_epoch_{epoch:04d}.pth",
-            ]
-            for checkpoint_path in checkpoint_paths:
-                state = {
-                    "model": model_without_ddp.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                }
-                if lr_scheduler is not None:
-                    state["lr_scheduler"] = lr_scheduler.state_dict()
-                torch.save(
-                    state,
-                    checkpoint_path,
-                )
+            state = {
+                "model": model_without_ddp.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": epoch,
+            }
+            if lr_scheduler is not None:
+                state["lr_scheduler"] = lr_scheduler.state_dict()
+            torch.save(state, output_dir / "checkpoint.pth")
 
-        test_stats = evaluate(
-            args,
-            dev_dataloader,
-            model,
-            model_without_ddp,
-            tokenizer,
-            ce_criterion,
-            config,
-            UNK_IDX,
-            SPECIAL_SYMBOLS,
-            PAD_IDX,
-            device,
-            fps=args.fps,
-            accelerator=accelerator,
-        )
-        print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+        eval_every = args.eval_every if args.eval_every and args.eval_every > 0 else None
+        do_eval = (
+            (not args.skip_val)
+            and (eval_every is not None)
+            and (((epoch + 1) % eval_every) == 0 or epoch == (args.epochs - 1))
         )
 
-        if max_accuracy < test_stats["belu4"]:
-            max_accuracy = test_stats["belu4"]
-            if args.output_dir and accelerator.is_main_process:
-                state = {
-                    "model": model_without_ddp.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                    "args": args,
-                    "metrics": {
-                        "bleu1": test_stats.get("bleu1"),
-                        "bleu2": test_stats.get("bleu2"),
-                        "bleu3": test_stats.get("bleu3"),
-                        "bleu4": test_stats.get("bleu4"),
-                        "rouge_l": test_stats.get("rouge_l"),
-                        "dev_loss": test_stats.get("loss"),
-                        "train_loss": train_stats.get("loss"),
-                        "inference_time_per_video_s": test_stats.get("inference_time_per_video_s"),
-                        "inference_rtf": test_stats.get("inference_rtf"),
-                    },
-                }
-                if lr_scheduler is not None:
-                    state["lr_scheduler"] = lr_scheduler.state_dict()
-                torch.save(state, output_dir / "best_checkpoint.pth")
-
-        print(f"Max BELU-4: {max_accuracy:.2f}%")
-        if accelerator.is_main_process:
-            wandb.log(
-                {
-                    "epoch": epoch + 1,
-                    "training/train_loss": train_stats["loss"],
-                    "dev/dev_loss": test_stats["loss"],
-                    "dev/Bleu_1": test_stats.get("bleu1", 0.0),
-                    "dev/Bleu_2": test_stats.get("bleu2", 0.0),
-                    "dev/Bleu_3": test_stats.get("bleu3", 0.0),
-                    "dev/Bleu_4": test_stats["belu4"],
-                    "dev/Best_Bleu_4": max_accuracy,
-                    "dev/ROUGE_L": test_stats.get("rouge_l", 0.0),
-                    "dev/inference_time_per_video_s": test_stats.get("inference_time_per_video_s", 0.0),
-                    "dev/inference_rtf": test_stats.get("inference_rtf", 0.0),
-                },
+        test_stats = None
+        if do_eval:
+            test_stats = evaluate(
+                args,
+                dev_dataloader,
+                model,
+                model_without_ddp,
+                tokenizer,
+                ce_criterion,
+                config,
+                UNK_IDX,
+                SPECIAL_SYMBOLS,
+                PAD_IDX,
+                device,
+                fps=args.fps,
+                accelerator=accelerator,
             )
+            print(
+                f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+            )
+
+            dev_loss = test_stats.get("loss")
+            if state is not None:
+                dev_loss_str = (
+                    f"{dev_loss:.4f}".replace(".", "p")
+                    if isinstance(dev_loss, (float, int))
+                    else "unknown"
+                )
+                devloss_checkpoint = (
+                    output_dir / f"checkpoint_epoch_{epoch:04d}_devloss_{dev_loss_str}.pth"
+                )
+                torch.save(state, devloss_checkpoint)
+
+            if max_accuracy < test_stats["belu4"]:
+                max_accuracy = test_stats["belu4"]
+                if args.output_dir and accelerator.is_main_process:
+                    state = {
+                        "model": model_without_ddp.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "epoch": epoch,
+                        "args": args,
+                        "metrics": {
+                            "bleu1": test_stats.get("bleu1"),
+                            "bleu2": test_stats.get("bleu2"),
+                            "bleu3": test_stats.get("bleu3"),
+                            "bleu4": test_stats.get("bleu4"),
+                            "rouge_l": test_stats.get("rouge_l"),
+                            "dev_loss": test_stats.get("loss"),
+                            "train_loss": train_stats.get("loss"),
+                            "inference_time_per_video_s": test_stats.get(
+                                "inference_time_per_video_s",
+                            ),
+                            "inference_rtf": test_stats.get("inference_rtf"),
+                        },
+                    }
+                    if lr_scheduler is not None:
+                        state["lr_scheduler"] = lr_scheduler.state_dict()
+                    torch.save(state, output_dir / "best_checkpoint.pth")
+                    if dev_loss is not None:
+                        best_dev_loss_str = f"{dev_loss:.4f}".replace(".", "p")
+                        torch.save(
+                            state,
+                            output_dir / f"best_checkpoint_devloss_{best_dev_loss_str}.pth",
+                        )
+
+            print(f"Max BELU-4: {max_accuracy:.2f}%")
+
+        if accelerator.is_main_process:
+            wandb_payload = {
+                "epoch": epoch + 1,
+                "training/train_loss": train_stats["loss"],
+            }
+            if test_stats is not None:
+                wandb_payload.update(
+                    {
+                        "dev/dev_loss": test_stats["loss"],
+                        "dev/Bleu_1": test_stats.get("bleu1", 0.0),
+                        "dev/Bleu_2": test_stats.get("bleu2", 0.0),
+                        "dev/Bleu_3": test_stats.get("bleu3", 0.0),
+                        "dev/Bleu_4": test_stats["belu4"],
+                        "dev/Best_Bleu_4": max_accuracy,
+                        "dev/ROUGE_L": test_stats.get("rouge_l", 0.0),
+                        "dev/inference_time_per_video_s": test_stats.get(
+                            "inference_time_per_video_s",
+                            0.0,
+                        ),
+                        "dev/inference_rtf": test_stats.get("inference_rtf", 0.0),
+                    },
+                )
+            wandb.log(wandb_payload)
 
         log_stats = {
             **{f"train_{k}": v for k, v in train_stats.items()},
             "epoch": epoch,
             "n_parameters": n_parameters,
         }
-        if not args.skip_val:
+        if test_stats is not None:
             log_stats.update({f"test_{k}": v for k, v in test_stats.items()})
 
         if args.output_dir and accelerator.is_main_process:
@@ -962,17 +994,6 @@ def train_one_epoch(
 
         if (step + 1) % 10 == 0 and args.visualize:
             utils.visualization(model.visualize())
-
-        if output_dir is not None and (step + 1) % 300 == 0 and accelerator.is_main_process:
-            torch.save(
-                {
-                    "model": accelerator.unwrap_model(model).state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                    "step": step,
-                },
-                output_dir / "checkpoint_mid_epoch.pth",
-            )
 
         if args.debug and step >= 1:
             print("*** DEBUG MODE: stopping after 2 batches ***")

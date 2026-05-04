@@ -9,6 +9,7 @@ else
   export CUDA_VISIBLE_DEVICES=0
 fi
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONUNBUFFERED=1  # flush Python output immediately so errors survive process-group kills
 ulimit -n 65536  # prevent "Too many open files" from DataLoader tensor fd sharing
 source "$(dirname "$0")/slib/monitor_cmd.bash"
 
@@ -94,7 +95,7 @@ else
 fi
 
 monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
-  --batch-size 4 \
+  --batch-size 2 \
   --accum-steps 4 \
   --gradient-checkpointing \
   --epochs 100 \
