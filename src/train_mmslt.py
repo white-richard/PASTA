@@ -123,6 +123,13 @@ def get_args_parser():
         help="learning rate (default: 5e-4)",
     )
     parser.add_argument(
+        "--lr-llm",
+        type=float,
+        default=None,
+        metavar="LR",
+        help="Learning rate for LLM LoRA params. Defaults to --lr when not set.",
+    )
+    parser.add_argument(
         "--lr-noise",
         type=float,
         nargs="+",
@@ -586,7 +593,31 @@ def main(args, config) -> None:
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
 
-    optimizer = create_optimizer(args, model_without_ddp)
+    # Build param groups: separate LR for LLM (LoRA) vs. vision/projector.
+    # WD is still filtered from biases and 1-D params in both halves.
+    lr_llm = args.lr_llm if args.lr_llm is not None else args.lr
+    _is_llm = lambda n: any(k in n for k in ("gemma4", "mbart"))
+    _no_wd  = lambda n, p: p.ndim <= 1 or n.endswith(".bias")
+    _pg: dict[tuple, list] = {
+        (False, False): [], (False, True): [],
+        (True,  False): [], (True,  True): [],
+    }
+    for n, p in model_without_ddp.named_parameters():
+        if p.requires_grad:
+            _pg[(_is_llm(n), _no_wd(n, p))].append(p)
+    optimizer = torch.optim.AdamW(
+        [
+            g for g in [
+                {"params": _pg[(False, False)], "lr": args.lr,  "weight_decay": args.weight_decay},
+                {"params": _pg[(False, True)],  "lr": args.lr,  "weight_decay": 0.0},
+                {"params": _pg[(True,  False)], "lr": lr_llm,   "weight_decay": args.weight_decay},
+                {"params": _pg[(True,  True)],  "lr": lr_llm,   "weight_decay": 0.0},
+            ]
+            if g["params"]
+        ],
+        betas=tuple(args.opt_betas),
+        eps=args.opt_eps,
+    )
     print(optimizer)
 
     lr_scheduler = scheduler.CosineAnnealingLR(
@@ -977,6 +1008,8 @@ def train_one_epoch(
                 ce_loss = ce_criterion(logits, label.to(device, non_blocking=True))
 
             accelerator.backward(ce_loss)
+            if args.clip_grad is not None:
+                accelerator.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimizer.step()
             optimizer.zero_grad()
 
@@ -990,7 +1023,7 @@ def train_one_epoch(
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-        metric_logger.update(lr_llm=round(float(optimizer.param_groups[1]["lr"]), 8))
+        metric_logger.update(lr_llm=round(float(optimizer.param_groups[-1]["lr"]), 8))
 
         if (step + 1) % 10 == 0 and args.visualize:
             utils.visualization(model.visualize())

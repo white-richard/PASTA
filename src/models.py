@@ -343,8 +343,10 @@ class MMSLT(nn.Module):
                 attention_mask=combined_mask,
                 per_layer_inputs=per_layer_inputs,
             )
-            # Return only text-position logits; loss computed externally with ce_criterion
-            return self._g4_logits(outputs.last_hidden_state)[:, T:, :]
+            # Return logits aligned with tgt labels: last vision position predicts tok_0,
+            # first text position predicts tok_1, etc.
+            L = tgt_ids.shape[1]
+            return self._g4_logits(outputs.last_hidden_state)[:, T - 1 : T + L - 1, :]
         else:
             out = self.mbart(
                 inputs_embeds=inputs_embeds,
