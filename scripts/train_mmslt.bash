@@ -101,7 +101,7 @@ monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --opt adamw \
     --lr 5e-4 \
     --lr-llm 1e-4 \
-    --min_lr 5e-5 \
+    --min-lr 5e-5 \
     --clip-grad 1.0 \
     --weight-decay 0.05 \
     --warmup-epochs 0 \
