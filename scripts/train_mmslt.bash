@@ -97,11 +97,11 @@ fi
 monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --batch-size 2 \
     --accum-steps 4 \
-    --gradient-checkpointing \
     --epochs 65 \
     --opt adamw \
     --lr 5e-4 \
     --lr-llm 1e-4 \
+    --min_lr 5e-5 \
     --clip-grad 1.0 \
     --weight-decay 0.05 \
     --warmup-epochs 0 \

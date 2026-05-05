@@ -20,7 +20,6 @@ from hpman.m import _
 from loguru import logger
 from rouge_score import rouge_scorer as _rouge_module
 from sacrebleu.metrics import BLEU
-from timm.optim import create_optimizer
 from torch import nn
 from torch.backends import cudnn
 from torch.optim import lr_scheduler as scheduler
@@ -596,22 +595,30 @@ def main(args, config) -> None:
     # Build param groups: separate LR for LLM (LoRA) vs. vision/projector.
     # WD is still filtered from biases and 1-D params in both halves.
     lr_llm = args.lr_llm if args.lr_llm is not None else args.lr
-    _is_llm = lambda n: any(k in n for k in ("gemma4", "mbart"))
-    _no_wd  = lambda n, p: p.ndim <= 1 or n.endswith(".bias")
+
+    def _is_llm(n):
+        return any(k in n for k in ("gemma4", "mbart"))
+
+    def _no_wd(n, p):
+        return p.ndim <= 1 or n.endswith(".bias")
+
     _pg: dict[tuple, list] = {
-        (False, False): [], (False, True): [],
-        (True,  False): [], (True,  True): [],
+        (False, False): [],
+        (False, True): [],
+        (True, False): [],
+        (True, True): [],
     }
     for n, p in model_without_ddp.named_parameters():
         if p.requires_grad:
             _pg[(_is_llm(n), _no_wd(n, p))].append(p)
     optimizer = torch.optim.AdamW(
         [
-            g for g in [
-                {"params": _pg[(False, False)], "lr": args.lr,  "weight_decay": args.weight_decay},
-                {"params": _pg[(False, True)],  "lr": args.lr,  "weight_decay": 0.0},
-                {"params": _pg[(True,  False)], "lr": lr_llm,   "weight_decay": args.weight_decay},
-                {"params": _pg[(True,  True)],  "lr": lr_llm,   "weight_decay": 0.0},
+            g
+            for g in [
+                {"params": _pg[(False, False)], "lr": args.lr, "weight_decay": args.weight_decay},
+                {"params": _pg[(False, True)], "lr": args.lr, "weight_decay": 0.0},
+                {"params": _pg[(True, False)], "lr": lr_llm, "weight_decay": args.weight_decay},
+                {"params": _pg[(True, True)], "lr": lr_llm, "weight_decay": 0.0},
             ]
             if g["params"]
         ],
@@ -622,7 +629,7 @@ def main(args, config) -> None:
 
     lr_scheduler = scheduler.CosineAnnealingLR(
         optimizer=optimizer,
-        eta_min=args.lr * 0.08,
+        eta_min=args.min_lr,
         T_max=args.epochs,
     )
     ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
