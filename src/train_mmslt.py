@@ -419,6 +419,10 @@ def main(args, config) -> None:
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(args.gemma4_model_id)
+        # Causal LM needs right-padding so the vision→text junction is correct:
+        # with left-padding, the last vis hidden state learns to predict PAD (0)
+        # instead of the first real text token, which tanks generation quality.
+        tokenizer.padding_side = "right"
     else:
         tokenizer = MBart50TokenizerFast.from_pretrained(
             "facebook/mbart-large-50-many-to-many-mmt",
@@ -632,7 +636,10 @@ def main(args, config) -> None:
         eta_min=args.min_lr,
         T_max=args.epochs,
     )
-    ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.2)
+    # For Gemma4: pad_token_id=0, eos_token_id=1. PAD_IDX=1 would wrongly ignore EOS.
+    # For mbart: PAD_IDX=1 matches mbart's pad token — leave as-is.
+    pad_ignore_idx = tokenizer.pad_token_id if args.language_decoder == "gemma4" else PAD_IDX
+    ce_criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_ignore_idx, label_smoothing=0.2)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

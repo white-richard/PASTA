@@ -32,7 +32,7 @@ TEST_CHECKPOINT=""
 # Optional: path to a pretrained GMMLP checkpoint (from train_gmmlp.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
-GMMLP_CHECKPOINT="1_checkpoint_epoch_46_devloss_3p2652.pth"
+GMMLP_CHECKPOINT="picked_checkpoint_epoch_53_devloss_3p2124.pth"
 # Architecture must match the checkpoint produced by train_gmmlp.bash.
 GMMLP_MODEL_ID="google/gemma-4-E2B-it"
 GMMLP_MODEL_FAMILY="gemma4"
