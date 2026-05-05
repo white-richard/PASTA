@@ -458,7 +458,7 @@ def main(args, config) -> None:
         "pin_memory": pin_mem,
     }
     if args.num_workers > 0:
-        train_loader_kwargs["prefetch_factor"] = 1
+        train_loader_kwargs["prefetch_factor"] = 2
         train_loader_kwargs["persistent_workers"] = True
 
     eval_loader_kwargs = {
@@ -467,8 +467,8 @@ def main(args, config) -> None:
         "pin_memory": pin_mem,
     }
     if args.eval_num_workers > 0:
-        eval_loader_kwargs["prefetch_factor"] = 1
-        eval_loader_kwargs["persistent_workers"] = False
+        eval_loader_kwargs["prefetch_factor"] = 2
+        eval_loader_kwargs["persistent_workers"] = True
 
     train_dataloader = DataLoader(train_data, **train_loader_kwargs)
 
@@ -1088,7 +1088,9 @@ def evaluate(
             ),
         ):
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                out_logits = model(src_input, tgt_input)
+                # Encode vision once; reuse embeddings for both loss and generation.
+                vis_embeds, vis_mask = model_without_ddp.encode_vision(src_input)
+                out_logits = model_without_ddp.forward_from_embeds(vis_embeds, vis_mask, tgt_input)
                 label = tgt_input["input_ids"].reshape(-1)
                 logits = out_logits.reshape(-1, out_logits.shape[-1])
                 tgt_loss = criterion(logits, label.to(device))
@@ -1098,8 +1100,9 @@ def evaluate(
                 torch.cuda.synchronize(device)
             t_gen_start = time.perf_counter()
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                output = model_without_ddp.generate(
-                    src_input,
+                output = model_without_ddp.generate_from_embeds(
+                    vis_embeds,
+                    vis_mask,
                     max_new_tokens=args.eval_max_new_tokens,
                     num_beams=args.eval_num_beams,
                     forced_bos_token_id=forced_bos,
