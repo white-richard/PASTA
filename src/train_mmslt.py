@@ -393,6 +393,11 @@ def get_args_parser():
         action="store_true",
         help="Enable gradient checkpointing on Gemma4 to reduce VRAM at the cost of ~20%% recompute.",
     )
+    parser.add_argument(
+        "--freeze-gmmlp",
+        action="store_true",
+        help="Freeze all GMMLP encoder (Perceiver) parameters during MMSLT training.",
+    )
 
     return parser
 
@@ -538,6 +543,10 @@ def main(args, config) -> None:
         print(
             f"Loaded GMMLP encoder (D_vit={gmmlp_encoder.vit_hidden}, K={gmmlp_encoder.num_latents})",
         )
+        if args.freeze_gmmlp:
+            for param in gmmlp_encoder.parameters():
+                param.requires_grad = False
+            print("GMMLP encoder frozen (--freeze-gmmlp).")
 
     model = MMSLT(
         config,
@@ -601,7 +610,7 @@ def main(args, config) -> None:
     lr_llm = args.lr_llm if args.lr_llm is not None else args.lr
 
     def _is_llm(n):
-        return any(k in n for k in ("gemma4", "mbart"))
+        return any(k in n for k in ("gemma4", "mbart", "gmmlp_encoder"))
 
     def _no_wd(n, p):
         return p.ndim <= 1 or n.endswith(".bias")
@@ -631,11 +640,29 @@ def main(args, config) -> None:
     )
     print(optimizer)
 
-    lr_scheduler = scheduler.CosineAnnealingLR(
-        optimizer=optimizer,
-        eta_min=args.min_lr,
-        T_max=args.epochs,
-    )
+    if args.warmup_epochs > 0:
+        warmup_sched = scheduler.LinearLR(
+            optimizer,
+            start_factor=args.warmup_lr / max(args.lr, lr_llm),
+            end_factor=1.0,
+            total_iters=args.warmup_epochs,
+        )
+        cosine_sched = scheduler.CosineAnnealingLR(
+            optimizer,
+            eta_min=args.min_lr,
+            T_max=max(1, args.epochs - args.warmup_epochs),
+        )
+        lr_scheduler = scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_sched, cosine_sched],
+            milestones=[args.warmup_epochs],
+        )
+    else:
+        lr_scheduler = scheduler.CosineAnnealingLR(
+            optimizer=optimizer,
+            eta_min=args.min_lr,
+            T_max=args.epochs,
+        )
     # For Gemma4: pad_token_id=0, eos_token_id=1. PAD_IDX=1 would wrongly ignore EOS.
     # For mbart: PAD_IDX=1 matches mbart's pad token — leave as-is.
     pad_ignore_idx = tokenizer.pad_token_id if args.language_decoder == "gemma4" else PAD_IDX
@@ -734,7 +761,7 @@ def main(args, config) -> None:
             output_dir=output_dir,
         )
         if lr_scheduler is not None:
-            lr_scheduler.step(epoch)
+            lr_scheduler.step()
         train_peak_ram_gb = max(train_peak_ram_gb, train_stats.get("peak_ram_gb", 0.0))
 
         state = None
