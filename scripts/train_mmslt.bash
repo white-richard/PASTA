@@ -29,6 +29,12 @@ EVAL_METRICS="true"
 # Optional: path to an MMSLT checkpoint (.pth). When set, run eval-only.
 TEST_CHECKPOINT=""
 
+# Set to "true" to freeze all language decoder (mbart/gemma4) parameters.
+FREEZE_LLM="true"
+# Optional: text prompt prepended to the LLM decoder during training and generation.
+# Leave empty to disable.
+DECODER_PROMPT="Übersetze die Gebärden in deutschen Text:"
+
 # Optional: path to a pretrained GMMLP checkpoint (from train_gmmlp.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
@@ -87,6 +93,12 @@ fi
 if [[ -n "${TEST_CHECKPOINT}" ]]; then
     EXTRA_ARGS+=(--eval --resume "${TEST_CHECKPOINT}")
 fi
+if [[ "${FREEZE_LLM}" == "true" ]]; then
+    EXTRA_ARGS+=(--freeze-llm)
+fi
+if [[ -n "${DECODER_PROMPT}" ]]; then
+    EXTRA_ARGS+=(--decoder-prompt "${DECODER_PROMPT}")
+fi
 
 if [[ "${NUM_GPUS}" -ge 2 ]]; then
     LAUNCH=(accelerate launch --num_processes "${NUM_GPUS}")
@@ -97,7 +109,7 @@ fi
 monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --batch-size 2 \
     --accum-steps 4 \
-    --epochs 45 \
+    --epochs 100 \
     --opt adamw \
     --lr 1e-4 \
     --lr-llm 1e-4 \
@@ -109,7 +121,6 @@ monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --vision_backbone "${VISION_BACKBONE}" \
     --gmmlp_feat_cache "datasets/phoenix-vision_feats/A4B_features" \
     --gmmlp_n_tokens 0 \
-    --freeze-gmmlp \
     --output_dir "${OUTPUT_DIR}" \
     --num_workers 8 \
     --eval_num_workers 4 \

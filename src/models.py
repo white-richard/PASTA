@@ -265,6 +265,33 @@ class MMSLT(nn.Module):
             for param in self.descriptproj.parameters():
                 param.requires_grad = False
 
+    def set_decoder_prompt(self, prompt_ids: torch.Tensor) -> None:
+        """Register tokenized prompt token IDs (1, P) to prepend before target tokens."""
+        self.register_buffer("_prompt_ids", prompt_ids, persistent=False)
+
+    def _prepend_prompt_embeds(self, inputs_embeds, attention_mask):
+        """If a decoder prompt is set, embed it and prepend between vision and text tokens.
+
+        Returns (combined_embeds, combined_mask, prompt_len).
+        """
+        if not hasattr(self, "_prompt_ids") or self._prompt_ids is None:
+            return inputs_embeds, attention_mask, 0
+
+        B = inputs_embeds.shape[0]
+        device = inputs_embeds.device
+        if self.language_decoder == "gemma4":
+            prompt_ids = self._prompt_ids.to(device).expand(B, -1)
+            prompt_embeds = self._g4_text.embed_tokens(prompt_ids)  # (B, P, D)
+        else:
+            prompt_ids = self._prompt_ids.to(device).expand(B, -1)
+            prompt_embeds = self.mbart.model.shared(prompt_ids)     # (B, P, D)
+
+        P = prompt_embeds.shape[1]
+        prompt_mask = torch.ones(B, P, dtype=attention_mask.dtype, device=device)
+        combined_embeds = torch.cat([inputs_embeds, prompt_embeds], dim=1)
+        combined_mask = torch.cat([attention_mask, prompt_mask], dim=1)
+        return combined_embeds, combined_mask, P
+
     def share_forward(self, src_input):
         if hasattr(self, "gmmlp_encoder"):
             # GMMLP path: frames → Perceiver latents (B, K, D_vit) → projector.
@@ -331,22 +358,25 @@ class MMSLT(nn.Module):
 
         if self.language_decoder == "gemma4":
             B, T, _ = inputs_embeds.shape
-            tgt_ids = tgt_input["input_ids"].cuda()
-            tok_embeds = self._g4_text.embed_tokens(tgt_ids)                     # (B, L, D)
-            combined_embeds = torch.cat([inputs_embeds, tok_embeds], dim=1)      # (B, T+L, D)
-            combined_mask = torch.cat(
-                [attention_mask.cuda(), tgt_input["attention_mask"].cuda()], dim=1
+            vis_embeds_with_prompt, vis_mask_with_prompt, P = self._prepend_prompt_embeds(
+                inputs_embeds, attention_mask.cuda()
             )
-            per_layer_inputs = self._g4_ple(B, T, inputs_embeds.device, inputs_embeds.dtype, tgt_ids)
+            T_total = T + P
+            tgt_ids = tgt_input["input_ids"].cuda()
+            tok_embeds = self._g4_text.embed_tokens(tgt_ids)                         # (B, L, D)
+            combined_embeds = torch.cat([vis_embeds_with_prompt, tok_embeds], dim=1)  # (B, T_total+L, D)
+            combined_mask = torch.cat(
+                [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()], dim=1
+            )
+            per_layer_inputs = self._g4_ple(B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids)
             outputs = self._g4_text(
                 inputs_embeds=combined_embeds,
                 attention_mask=combined_mask,
                 per_layer_inputs=per_layer_inputs,
             )
-            # Return logits aligned with tgt labels: last vision position predicts tok_0,
-            # first text position predicts tok_1, etc.
+            # Logits aligned with tgt labels: last vis+prompt position predicts tok_0, etc.
             L = tgt_ids.shape[1]
-            return self._g4_logits(outputs.last_hidden_state)[:, T - 1 : T + L - 1, :]
+            return self._g4_logits(outputs.last_hidden_state)[:, T_total - 1 : T_total + L - 1, :]
         else:
             out = self.mbart(
                 inputs_embeds=inputs_embeds,
@@ -369,20 +399,24 @@ class MMSLT(nn.Module):
         """Like forward(), but takes pre-computed vision embeddings."""
         if self.language_decoder == "gemma4":
             B, T, _ = inputs_embeds.shape
+            vis_embeds_with_prompt, vis_mask_with_prompt, P = self._prepend_prompt_embeds(
+                inputs_embeds, attention_mask.cuda()
+            )
+            T_total = T + P
             tgt_ids = tgt_input["input_ids"].cuda()
             tok_embeds = self._g4_text.embed_tokens(tgt_ids)
-            combined_embeds = torch.cat([inputs_embeds, tok_embeds], dim=1)
+            combined_embeds = torch.cat([vis_embeds_with_prompt, tok_embeds], dim=1)
             combined_mask = torch.cat(
-                [attention_mask.cuda(), tgt_input["attention_mask"].cuda()], dim=1
+                [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()], dim=1
             )
-            per_layer_inputs = self._g4_ple(B, T, inputs_embeds.device, inputs_embeds.dtype, tgt_ids)
+            per_layer_inputs = self._g4_ple(B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids)
             outputs = self._g4_text(
                 inputs_embeds=combined_embeds,
                 attention_mask=combined_mask,
                 per_layer_inputs=per_layer_inputs,
             )
             L = tgt_ids.shape[1]
-            return self._g4_logits(outputs.last_hidden_state)[:, T - 1 : T + L - 1, :]
+            return self._g4_logits(outputs.last_hidden_state)[:, T_total - 1 : T_total + L - 1, :]
         else:
             out = self.mbart(
                 inputs_embeds=inputs_embeds,
@@ -405,9 +439,12 @@ class MMSLT(nn.Module):
     ):
         """Like generate(), but takes pre-computed vision embeddings."""
         if self.language_decoder == "gemma4":
+            vis_embeds_with_prompt, vis_mask_with_prompt, _ = self._prepend_prompt_embeds(
+                inputs_embeds, attention_mask.cuda()
+            )
             return self._gemma4_generate(
-                inputs_embeds,
-                attention_mask.cuda(),
+                vis_embeds_with_prompt,
+                vis_mask_with_prompt,
                 max_new_tokens,
                 repetition_penalty=repetition_penalty,
                 no_repeat_ngram_size=no_repeat_ngram_size,

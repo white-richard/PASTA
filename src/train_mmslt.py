@@ -398,6 +398,18 @@ def get_args_parser():
         action="store_true",
         help="Freeze all GMMLP encoder (Perceiver) parameters during MMSLT training.",
     )
+    parser.add_argument(
+        "--freeze-llm",
+        action="store_true",
+        help="Freeze all language decoder (mbart/gemma4 LoRA) parameters during training.",
+    )
+    parser.add_argument(
+        "--decoder-prompt",
+        default="",
+        help="Text prompt prepended to the LLM decoder during both training and generation. "
+        "Embeddings are inserted between vision tokens and target tokens; loss is not "
+        "computed on prompt tokens.",
+    )
 
     return parser
 
@@ -601,6 +613,21 @@ def main(args, config) -> None:
         print("Missing keys: \n", "\n".join(ret.missing_keys))
         print("Unexpected keys: \n", "\n".join(ret.unexpected_keys))
 
+    if args.freeze_llm:
+        llm_module = model.gemma4 if args.language_decoder == "gemma4" else model.mbart
+        for param in llm_module.parameters():
+            param.requires_grad = False
+        print(f"Language decoder ({args.language_decoder}) frozen (--freeze-llm).")
+
+    if args.decoder_prompt:
+        prompt_ids = tokenizer(
+            args.decoder_prompt,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )["input_ids"]  # (1, P)
+        model.set_decoder_prompt(prompt_ids)
+        print(f"Decoder prompt set ({prompt_ids.shape[1]} tokens): {args.decoder_prompt!r}")
+
     model_without_ddp = model
     n_parameters = utils.count_parameters_in_MB(model_without_ddp)
     print(f"number of params: {n_parameters}M")
@@ -799,12 +826,13 @@ def main(args, config) -> None:
                 fps=args.fps,
                 accelerator=accelerator,
             )
-            print(
-                f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
-            )
+            if accelerator.is_main_process:
+                print(
+                    f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+                )
 
             dev_loss = test_stats.get("loss")
-            if state is not None:
+            if state is not None and accelerator.is_main_process:
                 dev_loss_str = (
                     f"{dev_loss:.4f}".replace(".", "p")
                     if isinstance(dev_loss, (float, int))
@@ -847,7 +875,8 @@ def main(args, config) -> None:
                             output_dir / f"best_checkpoint_devloss_{best_dev_loss_str}.pth",
                         )
 
-            print(f"Max BELU-4: {max_accuracy:.2f}%")
+            if accelerator.is_main_process:
+                print(f"Max BELU-4: {max_accuracy:.2f}%")
 
         if accelerator.is_main_process:
             wandb_payload = {
@@ -887,15 +916,17 @@ def main(args, config) -> None:
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print(f"Training time {total_time_str}")
+    if accelerator.is_main_process:
+        print(f"Training time {total_time_str}")
 
     train_peak_vram_gb = (
         torch.cuda.max_memory_allocated(device) / (1024**3) if torch.cuda.is_available() else 0.0
     )
-    print(
-        f"[memory/training] peak RAM: {train_peak_ram_gb:.2f} GB  "
-        f"peak VRAM: {train_peak_vram_gb:.2f} GB",
-    )
+    if accelerator.is_main_process:
+        print(
+            f"[memory/training] peak RAM: {train_peak_ram_gb:.2f} GB  "
+            f"peak VRAM: {train_peak_vram_gb:.2f} GB",
+        )
 
     # Last epoch: load best checkpoint, evaluate, and run single-video memory benchmark
     test_on_last_epoch = True
@@ -903,7 +934,8 @@ def main(args, config) -> None:
         test_model_path = output_dir / "best_checkpoint.pth"
         if not test_model_path.exists():
             test_model_path = output_dir / "checkpoint.pth"
-            print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
+            if accelerator.is_main_process:
+                print(f"Best checkpoint {test_model_path} does not exist, using {test_model_path}.")
         checkpoint = torch.load(test_model_path, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
 
@@ -922,9 +954,10 @@ def main(args, config) -> None:
             fps=args.fps,
             accelerator=accelerator,
         )
-        print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
-        )
+        if accelerator.is_main_process:
+            print(
+                f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+            )
 
         test_stats = evaluate(
             args,
@@ -941,9 +974,10 @@ def main(args, config) -> None:
             fps=args.fps,
             accelerator=accelerator,
         )
-        print(
-            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
-        )
+        if accelerator.is_main_process:
+            print(
+                f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
+            )
 
         # Single-video memory benchmark (same video every run: test_data[0])
         if accelerator.is_main_process:
@@ -1070,12 +1104,14 @@ def train_one_epoch(
             utils.visualization(model.visualize())
 
         if args.debug and step >= 1:
-            print("*** DEBUG MODE: stopping after 2 batches ***")
+            if accelerator.is_main_process:
+                print("*** DEBUG MODE: stopping after 2 batches ***")
             break
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print("Averaged stats:", metric_logger)
+    if accelerator.is_main_process:
+        print("Averaged stats:", metric_logger)
 
     return {
         **{k: meter.global_avg for k, meter in metric_logger.meters.items()},
@@ -1172,7 +1208,8 @@ def evaluate(
                 utils.visualization(model_without_ddp.visualize())
 
             if args.debug and step >= 1:
-                print("*** DEBUG MODE: stopping after 2 batches ***")
+                if _is_main:
+                    print("*** DEBUG MODE: stopping after 2 batches ***")
                 break
 
     # BLEU 1-4
@@ -1208,14 +1245,16 @@ def evaluate(
                 f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
             with open(ref_path, "w") as f:
                 f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
-            print("\n" + "*" * 80)
+            if _is_main:
+                print("\n" + "*" * 80)
             metrics = compute_metrics(
                 hypothesis=hyp_path,
                 references=[ref_path],
                 no_skipthoughts=True,
                 no_glove=True,
             )
-            print("*" * 80)
+            if _is_main:
+                print("*" * 80)
 
         def _maybe_pct(value):
             if value is None:
@@ -1237,15 +1276,16 @@ def evaluate(
             metric_logger.update(rouge_l=rouge_l)
 
     metric_logger.synchronize_between_processes()
-    print(
-        f"* BLEU-1/2/3/4: {bleu_scores['bleu1']:.2f}/{bleu_scores['bleu2']:.2f}/"
-        f"{bleu_scores['bleu3']:.2f}/{bleu_scores['bleu4']:.2f}  "
-        f"ROUGE-L: {rouge_l:.2f}  "
-        f"loss: {metric_logger.loss.global_avg:.3f}  "
-        f"gen: {avg_time_per_video:.3f}s/video  rtf: {inference_rtf:.3f}s/s",
-    )
+    if _is_main:
+        print(
+            f"* BLEU-1/2/3/4: {bleu_scores['bleu1']:.2f}/{bleu_scores['bleu2']:.2f}/"
+            f"{bleu_scores['bleu3']:.2f}/{bleu_scores['bleu4']:.2f}  "
+            f"ROUGE-L: {rouge_l:.2f}  "
+            f"loss: {metric_logger.loss.global_avg:.3f}  "
+            f"gen: {avg_time_per_video:.3f}s/video  rtf: {inference_rtf:.3f}s/s",
+        )
 
-    if args.eval and compute_metrics is not None:
+    if args.eval and compute_metrics is not None and _is_main:
         with open(args.output_dir + "/tmp_pres.txt", "w") as f:
             f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
         with open(args.output_dir + "/tmp_refs.txt", "w") as f:
