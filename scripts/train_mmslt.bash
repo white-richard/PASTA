@@ -97,18 +97,19 @@ fi
 monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --batch-size 2 \
     --accum-steps 4 \
-    --epochs 65 \
+    --epochs 45 \
     --opt adamw \
-    --lr 5e-4 \
+    --lr 1e-4 \
     --lr-llm 1e-4 \
-    --min-lr 5e-5 \
-    --clip-grad 5.0 \
-    --weight-decay 0.05 \
+    --min-lr 1e-5 \
+    --clip-grad 1.0 \
+    --weight-decay 0.01 \
     --warmup-epochs 2 \
     --config "${CONFIG}" \
     --vision_backbone "${VISION_BACKBONE}" \
     --gmmlp_feat_cache "datasets/phoenix-vision_feats/A4B_features" \
     --gmmlp_n_tokens 0 \
+    --freeze-gmmlp \
     --output_dir "${OUTPUT_DIR}" \
     --num_workers 8 \
     --eval_num_workers 4 \
