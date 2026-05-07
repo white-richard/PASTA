@@ -16,7 +16,7 @@ source "$(dirname "$0")/slib/monitor_cmd.bash"
 LANGUAGE_DECODER="gemma4" # mbart | gemma4
 GEMMA4_MODEL_ID="google/gemma-4-E2B-it"
 
-VISION_BACKBONE="resnet18"
+VISION_BACKBONE=""
 CONFIG="src/configs/config_mmslt_phoenix.yaml"
 OUTPUT_DIR="out/mmslt"
 SKIP_VAL="false"
