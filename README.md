@@ -34,7 +34,7 @@ https://how2sign.github.io/
 
 train, validation, test from:
 
-Green Screen RGB clips* (frontal view)
+Green Screen RGB clips\* (frontal view)
 
 English Translation (manually re-aligned)
 

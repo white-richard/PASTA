@@ -1,4 +1,0 @@
-Test: Total time: 0:02:40 (0.5010 s / it)
-* BELU-4 20.737 loss 4.583
-BELU-4 of the network on the 321 test videos: 20.74
-Training time 2 days, 6:25:12

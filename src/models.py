@@ -245,7 +245,9 @@ class MMSLT(nn.Module):
             # (B, K, D_vit) Perceiver latents that are projected directly to the LM space.
             self.gmmlp_encoder = gmmlp_encoder
             gmmlp_dim = gmmlp_encoder.vit_hidden
-            self.projector = Projector(input_dim=gmmlp_dim, hidden_dim=planes, output_dim=planes_out)
+            self.projector = Projector(
+                input_dim=gmmlp_dim, hidden_dim=planes, output_dim=planes_out
+            )
         else:
             self.backbone, backbone_dim = build_backbone(vision_backbone)
             # Description mapper
@@ -284,7 +286,7 @@ class MMSLT(nn.Module):
             prompt_embeds = self._g4_text.embed_tokens(prompt_ids)  # (B, P, D)
         else:
             prompt_ids = self._prompt_ids.to(device).expand(B, -1)
-            prompt_embeds = self.mbart.model.shared(prompt_ids)     # (B, P, D)
+            prompt_embeds = self.mbart.model.shared(prompt_ids)  # (B, P, D)
 
         P = prompt_embeds.shape[1]
         prompt_mask = torch.ones(B, P, dtype=attention_mask.dtype, device=device)
@@ -316,42 +318,6 @@ class MMSLT(nn.Module):
 
         return inputs_embeds, attention_mask
 
-    # Gemma4 helpers: bypass Gemma4Model.forward() to avoid the OOM from #
-    # Per-Layer Embedding
-    @property
-    def _g4_text(self):
-        """Gemma4TextModel with LoRA applied (accessed as a plain property to
-        avoid double-counting parameters in the optimizer)."""
-        return self.gemma4.base_model.model.model.language_model
-
-    @property
-    def _g4_head(self):
-        return self.gemma4.base_model.model.lm_head
-
-    def _g4_logits(self, hidden_states):
-        """Apply lm_head + final_logit_softcapping."""
-        logits = self._g4_head(hidden_states)
-        softcap = self.gemma4.config.text_config.final_logit_softcapping
-        if softcap:
-            logits = torch.tanh(logits / softcap) * softcap
-        return logits
-
-    def _g4_ple(self, B, T_vis, device, dtype, tgt_ids=None):
-        """Build the pre-computed per-layer embedding tensor.
-
-        Returns shape (B, T_vis [+ L], num_layers, h_ple) or None if the
-        model does not use PLE (hidden_size_per_layer_input == 0).
-        """
-        h_ple = self.gemma4.config.text_config.hidden_size_per_layer_input
-        if not h_ple:
-            return None
-        n = self.gemma4.config.text_config.num_hidden_layers
-        vis_ple = torch.zeros(B, T_vis, n, h_ple, dtype=dtype, device=device)
-        if tgt_ids is None:
-            return vis_ple
-        text_ple = self._g4_text.get_per_layer_inputs(tgt_ids, None)  # (B, L, n, h_ple)
-        return torch.cat([vis_ple, text_ple], dim=1)
-
     def forward(self, src_input, tgt_input):
 
         inputs_embeds, attention_mask = self.share_forward(src_input)
@@ -359,16 +325,22 @@ class MMSLT(nn.Module):
         if self.language_decoder == "gemma4":
             B, T, _ = inputs_embeds.shape
             vis_embeds_with_prompt, vis_mask_with_prompt, P = self._prepend_prompt_embeds(
-                inputs_embeds, attention_mask.cuda()
+                inputs_embeds,
+                attention_mask.cuda(),
             )
             T_total = T + P
             tgt_ids = tgt_input["input_ids"].cuda()
-            tok_embeds = self._g4_text.embed_tokens(tgt_ids)                         # (B, L, D)
-            combined_embeds = torch.cat([vis_embeds_with_prompt, tok_embeds], dim=1)  # (B, T_total+L, D)
+            tok_embeds = self._g4_text.embed_tokens(tgt_ids)  # (B, L, D)
+            combined_embeds = torch.cat(
+                [vis_embeds_with_prompt, tok_embeds], dim=1
+            )  # (B, T_total+L, D)
             combined_mask = torch.cat(
-                [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()], dim=1
+                [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()],
+                dim=1,
             )
-            per_layer_inputs = self._g4_ple(B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids)
+            per_layer_inputs = self._g4_ple(
+                B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids
+            )
             outputs = self._g4_text(
                 inputs_embeds=combined_embeds,
                 attention_mask=combined_mask,
@@ -377,15 +349,14 @@ class MMSLT(nn.Module):
             # Logits aligned with tgt labels: last vis+prompt position predicts tok_0, etc.
             L = tgt_ids.shape[1]
             return self._g4_logits(outputs.last_hidden_state)[:, T_total - 1 : T_total + L - 1, :]
-        else:
-            out = self.mbart(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask.cuda(),
-                labels=tgt_input["input_ids"].cuda(),
-                decoder_attention_mask=tgt_input["attention_mask"].cuda(),
-                return_dict=True,
-            )
-            return out["logits"]
+        out = self.mbart(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask.cuda(),
+            labels=tgt_input["input_ids"].cuda(),
+            decoder_attention_mask=tgt_input["attention_mask"].cuda(),
+            return_dict=True,
+        )
+        return out["logits"]
 
     def encode_vision(self, src_input):
         """Run just the vision encoder; return (inputs_embeds, attention_mask).
@@ -400,16 +371,20 @@ class MMSLT(nn.Module):
         if self.language_decoder == "gemma4":
             B, T, _ = inputs_embeds.shape
             vis_embeds_with_prompt, vis_mask_with_prompt, P = self._prepend_prompt_embeds(
-                inputs_embeds, attention_mask.cuda()
+                inputs_embeds,
+                attention_mask.cuda(),
             )
             T_total = T + P
             tgt_ids = tgt_input["input_ids"].cuda()
             tok_embeds = self._g4_text.embed_tokens(tgt_ids)
             combined_embeds = torch.cat([vis_embeds_with_prompt, tok_embeds], dim=1)
             combined_mask = torch.cat(
-                [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()], dim=1
+                [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()],
+                dim=1,
             )
-            per_layer_inputs = self._g4_ple(B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids)
+            per_layer_inputs = self._g4_ple(
+                B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids
+            )
             outputs = self._g4_text(
                 inputs_embeds=combined_embeds,
                 attention_mask=combined_mask,
@@ -417,15 +392,14 @@ class MMSLT(nn.Module):
             )
             L = tgt_ids.shape[1]
             return self._g4_logits(outputs.last_hidden_state)[:, T_total - 1 : T_total + L - 1, :]
-        else:
-            out = self.mbart(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask.cuda(),
-                labels=tgt_input["input_ids"].cuda(),
-                decoder_attention_mask=tgt_input["attention_mask"].cuda(),
-                return_dict=True,
-            )
-            return out["logits"]
+        out = self.mbart(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask.cuda(),
+            labels=tgt_input["input_ids"].cuda(),
+            decoder_attention_mask=tgt_input["attention_mask"].cuda(),
+            return_dict=True,
+        )
+        return out["logits"]
 
     def generate_from_embeds(
         self,
@@ -440,7 +414,8 @@ class MMSLT(nn.Module):
         """Like generate(), but takes pre-computed vision embeddings."""
         if self.language_decoder == "gemma4":
             vis_embeds_with_prompt, vis_mask_with_prompt, _ = self._prepend_prompt_embeds(
-                inputs_embeds, attention_mask.cuda()
+                inputs_embeds,
+                attention_mask.cuda(),
             )
             return self._gemma4_generate(
                 vis_embeds_with_prompt,
@@ -449,14 +424,13 @@ class MMSLT(nn.Module):
                 repetition_penalty=repetition_penalty,
                 no_repeat_ngram_size=no_repeat_ngram_size,
             )
-        else:
-            return self.mbart.generate(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask.cuda(),
-                max_new_tokens=max_new_tokens,
-                num_beams=num_beams,
-                forced_bos_token_id=forced_bos_token_id,
-            )
+        return self.mbart.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask.cuda(),
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
+            forced_bos_token_id=forced_bos_token_id,
+        )
 
     def generate(
         self,
@@ -477,102 +451,6 @@ class MMSLT(nn.Module):
             repetition_penalty=repetition_penalty,
             no_repeat_ngram_size=no_repeat_ngram_size,
         )
-
-    @torch.no_grad()
-    def _gemma4_generate(
-        self,
-        vis_embeds,
-        attention_mask,
-        max_new_tokens,
-        repetition_penalty: float = 1.3,
-        no_repeat_ngram_size: int = 4,
-    ):
-        """Greedy decoding with prefix KV-cache seeded by vision embeddings.
-
-        Calls Gemma4TextModel directly with same LoRA-adapted model used for
-        training.
-        """
-        from transformers import DynamicCache
-
-        B, T, _ = vis_embeds.shape
-        device = vis_embeds.device
-
-        vocab_size = self.gemma4.config.text_config.vocab_size
-
-        def _apply_penalties(logits: torch.Tensor, generated: torch.Tensor) -> torch.Tensor:
-            if repetition_penalty != 1.0 and generated.shape[1] > 0:
-                # Vectorized: build a boolean hit mask over the vocab for each batch item.
-                hit = torch.zeros(B, vocab_size, dtype=torch.bool, device=logits.device)
-                hit.scatter_(1, generated.clamp(0, vocab_size - 1), True)
-                penalized = torch.where(
-                    logits < 0,
-                    logits * repetition_penalty,
-                    logits / repetition_penalty,
-                )
-                logits = torch.where(hit, penalized, logits)
-            if no_repeat_ngram_size > 0 and generated.shape[1] >= no_repeat_ngram_size:
-                n = no_repeat_ngram_size
-                for b in range(B):
-                    seq = generated[b].tolist()
-                    ngram_prefix = tuple(seq[-(n - 1):])
-                    banned = {
-                        seq[i + n - 1]
-                        for i in range(len(seq) - (n - 1))
-                        if tuple(seq[i: i + n - 1]) == ngram_prefix
-                    }
-                    for tid in banned:
-                        logits[b, tid] = -float("inf")
-            return logits
-
-        # 1. Prefill KV cache with vision prefix
-        past_kv = DynamicCache()
-        vis_ple = self._g4_ple(B, T, device, vis_embeds.dtype)
-        outputs = self._g4_text(
-            inputs_embeds=vis_embeds,
-            attention_mask=attention_mask,
-            per_layer_inputs=vis_ple,
-            past_key_values=past_kv,
-            use_cache=True,
-        )
-        logits = self._g4_logits(outputs.last_hidden_state[:, -1, :])   # (B, vocab)
-        generated = torch.empty(B, 0, dtype=torch.long, device=device)
-        logits = _apply_penalties(logits, generated)
-        next_token = logits.argmax(dim=-1, keepdim=True)                 # (B, 1)
-        generated = next_token
-
-        # Pre-allocate the full attention mask buffer to avoid per-step cat() allocations.
-        prefix_len = attention_mask.shape[1]
-        full_mask_buf = torch.ones(
-            B, prefix_len + max_new_tokens, dtype=attention_mask.dtype, device=device
-        )
-        full_mask_buf[:, :prefix_len] = attention_mask
-
-        eos_id = self.gemma4.config.text_config.eos_token_id
-        if isinstance(eos_id, list):
-            eos_id = eos_id[0]
-        finished = torch.zeros(B, dtype=torch.bool, device=device)
-
-        # 2. Greedy token-by-token generation
-        for step in range(max_new_tokens - 1):
-            cur_mask_len = prefix_len + step + 1
-            tok_embeds = self._g4_text.embed_tokens(next_token)           # (B, 1, D)
-            step_ple = self._g4_ple(B, 0, device, tok_embeds.dtype, next_token)
-            outputs = self._g4_text(
-                inputs_embeds=tok_embeds,
-                attention_mask=full_mask_buf[:, :cur_mask_len],
-                per_layer_inputs=step_ple,
-                past_key_values=past_kv,
-                use_cache=True,
-            )
-            logits = self._g4_logits(outputs.last_hidden_state[:, -1, :])
-            logits = _apply_penalties(logits, generated)
-            next_token = logits.argmax(dim=-1, keepdim=True)
-            generated = torch.cat([generated, next_token], dim=1)
-            finished |= (next_token.squeeze(-1) == eos_id)
-            if finished.all():
-                break
-
-        return generated
 
 
 class TextEncoder(nn.Module):
