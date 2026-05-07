@@ -191,7 +191,7 @@ class MMSLT(nn.Module):
         vision_backbone="resnet18",
         language_decoder="mbart",
         gemma4_model_id="google/gemma-4-E2B-it",
-        gmmlp_encoder=None,
+        ppasta_encoder=None,
         local_rank=0,
     ) -> None:
         super().__init__()
@@ -239,14 +239,14 @@ class MMSLT(nn.Module):
             self.mbart.generation_config.max_length = None
             planes_out = planes  # MBart hidden size is 1024
 
-        if gmmlp_encoder is not None:
-            # Use pretrained GMMLP vision encoder (SigLIP2 ViT + Perceiver) instead of
+        if ppasta_encoder is not None:
+            # Use pretrained PPASTA vision encoder (SigLIP2 ViT + Perceiver) instead of
             # the standard backbone+descriptproj+conv pipeline. The encoder produces
             # (B, K, D_vit) Perceiver latents that are projected directly to the LM space.
-            self.gmmlp_encoder = gmmlp_encoder
-            gmmlp_dim = gmmlp_encoder.vit_hidden
+            self.ppasta_encoder = ppasta_encoder
+            ppasta_dim = ppasta_encoder.vit_hidden
             self.projector = Projector(
-                input_dim=gmmlp_dim, hidden_dim=planes, output_dim=planes_out
+                input_dim=ppasta_dim, hidden_dim=planes, output_dim=planes_out
             )
         else:
             self.backbone, backbone_dim = build_backbone(vision_backbone)
@@ -294,15 +294,128 @@ class MMSLT(nn.Module):
         combined_mask = torch.cat([attention_mask, prompt_mask], dim=1)
         return combined_embeds, combined_mask, P
 
+    # Gemma4 helpers: bypass Gemma4Model.forward() to avoid the OOM from
+    # per-layer embedding (PLE) recomputation over the full multimodal sequence.
+
+    @property
+    def _g4_text(self):
+        """Gemma4TextModel with LoRA applied."""
+        return self.gemma4.base_model.model.model.language_model
+
+    @property
+    def _g4_head(self):
+        return self.gemma4.base_model.model.lm_head
+
+    def _g4_logits(self, hidden_states):
+        """Apply lm_head + final_logit_softcapping."""
+        logits = self._g4_head(hidden_states)
+        softcap = self.gemma4.config.text_config.final_logit_softcapping
+        if softcap:
+            logits = torch.tanh(logits / softcap) * softcap
+        return logits
+
+    def _g4_ple(self, B, T_vis, device, dtype, tgt_ids=None):
+        """Build the per-layer embedding tensor.
+
+        Returns shape (B, T_vis [+ L], num_layers, h_ple) or None if the
+        model does not use PLE (hidden_size_per_layer_input == 0).
+        """
+        h_ple = self.gemma4.config.text_config.hidden_size_per_layer_input
+        if not h_ple:
+            return None
+        n = self.gemma4.config.text_config.num_hidden_layers
+        vis_ple = torch.zeros(B, T_vis, n, h_ple, dtype=dtype, device=device)
+        if tgt_ids is None:
+            return vis_ple
+        text_ple = self._g4_text.get_per_layer_inputs(tgt_ids, None)  # (B, L, n, h_ple)
+        return torch.cat([vis_ple, text_ple], dim=1)
+
+    @torch.no_grad()
+    def _gemma4_generate(
+        self,
+        vis_embeds,
+        attention_mask,
+        max_new_tokens,
+        repetition_penalty: float = 1.3,
+        no_repeat_ngram_size: int = 4,
+    ):
+        """Greedy decoding with prefix KV-cache seeded by vision embeddings."""
+        from transformers import DynamicCache
+
+        B, T, _ = vis_embeds.shape
+        device = vis_embeds.device
+        vocab_size = self.gemma4.config.text_config.vocab_size
+
+        def _apply_penalties(logits, generated):
+            if repetition_penalty != 1.0 and generated.shape[1] > 0:
+                hit = torch.zeros(B, vocab_size, dtype=torch.bool, device=logits.device)
+                hit.scatter_(1, generated.clamp(0, vocab_size - 1), True)
+                penalized = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
+                logits = torch.where(hit, penalized, logits)
+            if no_repeat_ngram_size > 0 and generated.shape[1] >= no_repeat_ngram_size:
+                n = no_repeat_ngram_size
+                for b in range(B):
+                    seq = generated[b].tolist()
+                    prefix = tuple(seq[-(n - 1):])
+                    banned = {seq[i + n - 1] for i in range(len(seq) - (n - 1)) if tuple(seq[i: i + n - 1]) == prefix}
+                    for tid in banned:
+                        logits[b, tid] = -float("inf")
+            return logits
+
+        past_kv = DynamicCache()
+        vis_ple = self._g4_ple(B, T, device, vis_embeds.dtype)
+        outputs = self._g4_text(
+            inputs_embeds=vis_embeds,
+            attention_mask=attention_mask,
+            per_layer_inputs=vis_ple,
+            past_key_values=past_kv,
+            use_cache=True,
+        )
+        logits = self._g4_logits(outputs.last_hidden_state[:, -1, :])
+        generated = torch.empty(B, 0, dtype=torch.long, device=device)
+        logits = _apply_penalties(logits, generated)
+        next_token = logits.argmax(dim=-1, keepdim=True)
+        generated = next_token
+
+        prefix_len = attention_mask.shape[1]
+        full_mask_buf = torch.ones(B, prefix_len + max_new_tokens, dtype=attention_mask.dtype, device=device)
+        full_mask_buf[:, :prefix_len] = attention_mask
+
+        eos_id = self.gemma4.config.text_config.eos_token_id
+        if isinstance(eos_id, list):
+            eos_id = eos_id[0]
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for step in range(max_new_tokens - 1):
+            cur_mask_len = prefix_len + step + 1
+            tok_embeds = self._g4_text.embed_tokens(next_token)
+            step_ple = self._g4_ple(B, 0, device, tok_embeds.dtype, next_token)
+            outputs = self._g4_text(
+                inputs_embeds=tok_embeds,
+                attention_mask=full_mask_buf[:, :cur_mask_len],
+                per_layer_inputs=step_ple,
+                past_key_values=past_kv,
+                use_cache=True,
+            )
+            logits = self._g4_logits(outputs.last_hidden_state[:, -1, :])
+            logits = _apply_penalties(logits, generated)
+            next_token = logits.argmax(dim=-1, keepdim=True)
+            generated = torch.cat([generated, next_token], dim=1)
+            finished |= (next_token.squeeze(-1) == eos_id)
+            if finished.all():
+                break
+
+        return generated
+
     def share_forward(self, src_input):
-        if hasattr(self, "gmmlp_encoder"):
-            # GMMLP path: frames → Perceiver latents (B, K, D_vit) → projector.
+        if hasattr(self, "ppasta_encoder"):
+            # PPASTA path: frames → Perceiver latents (B, K, D_vit) → projector.
             # Prefers pre-extracted vis_feats (skips ViT); falls back to PIL frames.
             if "vis_feats" in src_input:
                 enc_input = {"vis_feats": src_input["vis_feats"]}
             else:
                 enc_input = {"images": src_input["pil_frames"]}
-            latents = self.gmmlp_encoder.forward_latents(enc_input)  # (B, K, D_vit)
+            latents = self.ppasta_encoder.forward_latents(enc_input)  # (B, K, D_vit)
             inputs_embeds = self.projector(latents)  # (B, K, planes_out)
             B, K, _ = inputs_embeds.shape
             attention_mask = torch.ones(B, K, dtype=torch.long)

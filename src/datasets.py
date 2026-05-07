@@ -197,9 +197,9 @@ class S2T_Dataset(Dataset):
         config,
         args,
         phase,
-        use_gmmlp_backbone=False,
-        gmmlp_feat_cache=None,
-        gmmlp_n_tokens: int = 0,
+        use_ppasta_backbone=False,
+        ppasta_feat_cache=None,
+        ppasta_n_tokens: int = 0,
     ) -> None:
         self.config = config
         self.args = args
@@ -214,40 +214,40 @@ class S2T_Dataset(Dataset):
         )
         self.max_length = config["data"]["max_length"]
         self.img_path = config["data"]["img_path"]
-        self.use_gmmlp_backbone = use_gmmlp_backbone
+        self.use_ppasta_backbone = use_ppasta_backbone
 
         # Resolve per-video feature directory.
         # New format: {cache}/features_{phase}[_spatial{n}tok]/ with per-video .pt files.
         # Old format fallback: {cache}/{phase}/ with raw tensor .pt files.
-        self.gmmlp_feat_dir: Path | None = None
-        self._gmmlp_feat_is_dict = False  # True when files contain {"vis": tensor}
-        if gmmlp_feat_cache:
-            root = Path(gmmlp_feat_cache)
-            if gmmlp_n_tokens:
-                new_dir = root / f"features_{phase}_spatial{gmmlp_n_tokens}tok"
+        self.ppasta_feat_dir: Path | None = None
+        self._ppasta_feat_is_dict = False  # True when files contain {"vis": tensor}
+        if ppasta_feat_cache:
+            root = Path(ppasta_feat_cache)
+            if ppasta_n_tokens:
+                new_dir = root / f"features_{phase}_spatial{ppasta_n_tokens}tok"
             else:
                 new_dir = root / f"features_{phase}"
             if new_dir.exists():
-                self.gmmlp_feat_dir = new_dir
-                self._gmmlp_feat_is_dict = True
+                self.ppasta_feat_dir = new_dir
+                self._ppasta_feat_is_dict = True
             else:
                 # Fall back to old-style {cache}/{phase}/ directory.
                 old_dir = root / phase
                 if old_dir.exists():
-                    self.gmmlp_feat_dir = old_dir
+                    self.ppasta_feat_dir = old_dir
 
         self.list = [key for key, value in self.raw_data.items()]
 
-        if use_gmmlp_backbone and self.gmmlp_feat_dir is not None:
+        if use_ppasta_backbone and self.ppasta_feat_dir is not None:
             # Keep only videos that have a feature file — avoids mixed batches where
             # some items return vis_feats and others return PIL frames (which breaks
             # collate_fn when the ViT is not loaded).
             full_len = len(self.list)
             self.list = [
                 key for key in self.list
-                if (self.gmmlp_feat_dir / f"{key.split('/')[1] if '/' in key else key}.pt").exists()
+                if (self.ppasta_feat_dir / f"{key.split('/')[1] if '/' in key else key}.pt").exists()
             ]
-            print(f"  [{phase}] lazy GMMLP features from {self.gmmlp_feat_dir.name}/ ({len(self.list)}/{full_len} found)")
+            print(f"  [{phase}] lazy PPASTA features from {self.ppasta_feat_dir.name}/ ({len(self.list)}/{full_len} found)")
 
         def sometimes(aug):
             return va.Sometimes(
@@ -278,13 +278,13 @@ class S2T_Dataset(Dataset):
 
         img_paths = [self.img_path + x for x in sample["imgs_path"]]
 
-        if self.use_gmmlp_backbone:
+        if self.use_ppasta_backbone:
             vid_name = key.split("/")[1] if "/" in key else key
-            if self.gmmlp_feat_dir is not None:
-                pt = self.gmmlp_feat_dir / f"{vid_name}.pt"
+            if self.ppasta_feat_dir is not None:
+                pt = self.ppasta_feat_dir / f"{vid_name}.pt"
                 if pt.exists():
                     data = torch.load(pt, map_location="cpu", weights_only=False)
-                    vis_feats_full = data["vis"] if self._gmmlp_feat_is_dict else data
+                    vis_feats_full = data["vis"] if self._ppasta_feat_is_dict else data
                     n = len(vis_feats_full)
                     if n > self.max_length:
                         selected_indices = sorted(random.sample(range(n), k=self.max_length))
@@ -306,7 +306,7 @@ class S2T_Dataset(Dataset):
         return name_sample, descript_sample, tgt_sample, img_sample
 
     def load_all_pil_frames(self, paths: list) -> list:
-        """Load every frame as PIL (no subsampling) for GMMLP feature extraction."""
+        """Load every frame as PIL (no subsampling) for PPASTA feature extraction."""
         frames = []
         for p in paths:
             img = cv2.imread(p)
@@ -318,7 +318,7 @@ class S2T_Dataset(Dataset):
         return frames
 
     def load_pil_imgs(self, paths, selected_indices=None):
-        """Load raw PIL images (no normalization) for GMMLP backbone preprocessing."""
+        """Load raw PIL images (no normalization) for PPASTA backbone preprocessing."""
         if selected_indices is not None:
             paths = [paths[i] for i in selected_indices]
         elif len(paths) > self.max_length:
@@ -381,7 +381,7 @@ class S2T_Dataset(Dataset):
 
     def collate_fn(self, batch):
         # Fast path: all items have vis_feats from the per-video feature cache.
-        if self.use_gmmlp_backbone and all(item[-1] is not None for item in batch):
+        if self.use_ppasta_backbone and all(item[-1] is not None for item in batch):
             name_batch, tgt_batch, vis_feats_batch = [], [], []
             for name_sample, _descript, tgt_sample, _img, _pil, vis_feats in batch:
                 name_batch.append(name_sample)
@@ -397,11 +397,11 @@ class S2T_Dataset(Dataset):
             return {"vis_feats": vis_feats_batch, "name_batch": name_batch, "src_length_batch": src_length_batch}, tgt_input
 
         tgt_batch, txt_tmp, src_length_batch, name_batch, img_tmp = [], [], [], [], []
-        pil_frames_batch = [] if self.use_gmmlp_backbone else None
-        vis_feats_batch = [] if self.use_gmmlp_backbone else None
+        pil_frames_batch = [] if self.use_ppasta_backbone else None
+        vis_feats_batch = [] if self.use_ppasta_backbone else None
 
         for item in batch:
-            if self.use_gmmlp_backbone:
+            if self.use_ppasta_backbone:
                 name_sample, txt_sample, tgt_sample, img_sample, pil_frames, vis_feats = item
                 if vis_feats is not None:
                     vis_feats_batch.append(vis_feats)

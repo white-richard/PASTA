@@ -32,7 +32,7 @@ from transformers import (
 import utils
 from datasets import S2T_Dataset
 from definition import *
-from models import MMSLT
+from models import MMSLT as PASTA
 
 try:
     from nlgeval import compute_metrics
@@ -321,56 +321,56 @@ def get_args_parser():
         help="Run in debug mode: only 1 epoch and 2 batches per split.",
     )
 
-    # * GMMLP pretrained vision encoder
+    # * PPASTA pretrained vision encoder
     parser.add_argument(
-        "--gmmlp_checkpoint",
+        "--ppasta_checkpoint",
         default="",
-        help="Path to a GMMLP checkpoint (.pth) to use as the pretrained vision encoder. "
-        "When set, replaces the standard vision backbone with the GMMLP SigLIP2 ViT + "
+        help="Path to a PPASTA checkpoint (.pth) to use as the pretrained vision encoder. "
+        "When set, replaces the standard vision backbone with the PPASTA SigLIP2 ViT + "
         "Perceiver encoder. The dataset will supply raw PIL frames for preprocessing.",
     )
     parser.add_argument(
-        "--gmmlp_model_id",
+        "--ppasta_model_id",
         default="google/gemma-4-E2B-it",
-        help="HuggingFace model ID used when training the GMMLP checkpoint (needed to "
+        help="HuggingFace model ID used when training the PPASTA checkpoint (needed to "
         "reconstruct the vision tower architecture).",
     )
     parser.add_argument(
-        "--gmmlp_model_family",
+        "--ppasta_model_family",
         default="gemma4",
         choices=["llava", "gemma4"],
-        help="Model family of the GMMLP checkpoint ('gemma4' or 'llava').",
+        help="Model family of the PPASTA checkpoint ('gemma4' or 'llava').",
     )
-    parser.add_argument("--gmmlp_lora_r", type=int, default=16)
-    parser.add_argument("--gmmlp_lora_alpha", type=int, default=32)
-    parser.add_argument("--gmmlp_lora_dropout", type=float, default=0.05)
+    parser.add_argument("--ppasta_lora_r", type=int, default=8)
+    parser.add_argument("--ppasta_lora_alpha", type=int, default=16)
+    parser.add_argument("--ppasta_lora_dropout", type=float, default=0.05)
     parser.add_argument(
-        "--gmmlp_num_latents",
+        "--ppasta_num_latents",
         type=int,
         default=64,
-        help="Perceiver num_latents (K) used in the GMMLP checkpoint.",
+        help="Perceiver num_latents (K) used in the PPASTA checkpoint.",
     )
     parser.add_argument(
-        "--gmmlp_num_media_embeds",
+        "--ppasta_num_media_embeds",
         type=int,
         default=512,
-        help="Perceiver num_media_embeds used in the GMMLP checkpoint.",
+        help="Perceiver num_media_embeds used in the PPASTA checkpoint.",
     )
     parser.add_argument(
-        "--gmmlp_vision_chunk_size",
+        "--ppasta_vision_chunk_size",
         type=int,
-        default=8,
-        help="Frames processed per ViT chunk (matches GMMLP training value).",
+        default=16,
+        help="Frames processed per ViT chunk (matches PPASTA training value).",
     )
     parser.add_argument(
-        "--gmmlp_feat_cache",
+        "--ppasta_feat_cache",
         default="",
-        help="Root directory of pre-extracted GMMLP ViT features produced by extract_vision_feats.py. "
+        help="Root directory of pre-extracted PPASTA ViT features produced by extract_vision_feats.py. "
         "Contains features_{split}[_spatial{n}tok]/ subdirectories with per-video .pt files. "
         "When set, the ViT is not loaded and only the Perceiver runs during training.",
     )
     parser.add_argument(
-        "--gmmlp_n_tokens",
+        "--ppasta_n_tokens",
         type=int,
         default=0,
         help="Number of spatial patch tokens per frame (from pool_patches_spatial.py). "
@@ -394,9 +394,9 @@ def get_args_parser():
         help="Enable gradient checkpointing on Gemma4 to reduce VRAM at the cost of ~20%% recompute.",
     )
     parser.add_argument(
-        "--freeze-gmmlp",
+        "--freeze-ppasta",
         action="store_true",
-        help="Freeze all GMMLP encoder (Perceiver) parameters during MMSLT training.",
+        help="Freeze all PPASTA encoder (Perceiver) parameters during PASTA training.",
     )
     parser.add_argument(
         "--freeze-llm",
@@ -448,15 +448,15 @@ def main(args, config) -> None:
             model_max_length=1024,
         )
 
-    use_gmmlp_backbone = bool(args.gmmlp_checkpoint)
+    use_ppasta_backbone = bool(args.ppasta_checkpoint)
     dataset_kwargs = {
         "path": config["data"]["label_path"],
         "tokenizer": tokenizer,
         "config": config,
         "args": args,
-        "use_gmmlp_backbone": use_gmmlp_backbone,
-        "gmmlp_feat_cache": args.gmmlp_feat_cache or None,
-        "gmmlp_n_tokens": args.gmmlp_n_tokens,
+        "use_ppasta_backbone": use_ppasta_backbone,
+        "ppasta_feat_cache": args.ppasta_feat_cache or None,
+        "ppasta_n_tokens": args.ppasta_n_tokens,
     }
 
     train_data = S2T_Dataset(phase="train", **dataset_kwargs)
@@ -511,62 +511,61 @@ def main(args, config) -> None:
 
     print("Creating model:")
 
-    gmmlp_encoder = None
-    if args.gmmlp_checkpoint:
-        print(f"Loading GMMLP encoder from {args.gmmlp_checkpoint} …")
-        from train_gmmlp import GMMLPImageEncoder
+    ppasta_encoder = None
+    if args.ppasta_checkpoint:
+        print(f"Loading PPASTA encoder from {args.ppasta_checkpoint} …")
+        from train_ppasta import PASTAImageEncoder
 
         # When a feature cache is available, read D_vit from its metadata so we
         # can build a Perceiver-only encoder
         preextracted_vit_dim: int | None = None
-        if args.gmmlp_feat_cache:
+        if args.ppasta_feat_cache:
             split_name = (
-                f"features_train_spatial{args.gmmlp_n_tokens}tok"
-                if args.gmmlp_n_tokens
+                f"features_train_spatial{args.ppasta_n_tokens}tok"
+                if args.ppasta_n_tokens
                 else "features_train"
             )
-            meta_path = Path(args.gmmlp_feat_cache) / split_name / "_meta.pt"
+            meta_path = Path(args.ppasta_feat_cache) / split_name / "_meta.pt"
             meta = torch.load(meta_path, map_location="cpu", weights_only=False)
             preextracted_vit_dim = meta["d_vit"]
             print(f"  Perceiver-only mode: D_vit={preextracted_vit_dim} (ViT not loaded)")
 
-        gmmlp_encoder = GMMLPImageEncoder(
-            model_id=args.gmmlp_model_id,
-            model_family=args.gmmlp_model_family,
-            lora_r=args.gmmlp_lora_r,
-            lora_alpha=args.gmmlp_lora_alpha,
-            lora_dropout=args.gmmlp_lora_dropout,
-            num_latents=args.gmmlp_num_latents,
-            num_media_embeds=args.gmmlp_num_media_embeds,
-            vision_chunk_size=args.gmmlp_vision_chunk_size,
-            temperature=0.07,
+        ppasta_encoder = PASTAImageEncoder(
+            model_id=args.ppasta_model_id,
+            model_family=args.ppasta_model_family,
+            lora_r=args.ppasta_lora_r,
+            lora_alpha=args.ppasta_lora_alpha,
+            lora_dropout=args.ppasta_lora_dropout,
+            num_latents=args.ppasta_num_latents,
+            num_media_embeds=args.ppasta_num_media_embeds,
+            vision_chunk_size=args.ppasta_vision_chunk_size,
             preextracted_vit_dim=preextracted_vit_dim,
         )
-        ckpt = torch.load(args.gmmlp_checkpoint, map_location="cpu", weights_only=False)
+        ckpt = torch.load(args.ppasta_checkpoint, map_location="cpu", weights_only=False)
         prefix = "model_image."
         encoder_state = {
             k[len(prefix) :]: v for k, v in ckpt["model"].items() if k.startswith(prefix)
         }
-        missing, unexpected = gmmlp_encoder.load_state_dict(encoder_state, strict=False)
+        missing, unexpected = ppasta_encoder.load_state_dict(encoder_state, strict=False)
         if missing:
-            print("GMMLP encoder missing keys:\n", "\n".join(missing))
+            print("PPASTA encoder missing keys:\n", "\n".join(missing))
         if unexpected:
-            print("GMMLP encoder unexpected keys:\n", "\n".join(unexpected))
+            print("PPASTA encoder unexpected keys:\n", "\n".join(unexpected))
         print(
-            f"Loaded GMMLP encoder (D_vit={gmmlp_encoder.vit_hidden}, K={gmmlp_encoder.num_latents})",
+            f"Loaded PPASTA encoder (D_vit={ppasta_encoder.vit_hidden}, K={ppasta_encoder.num_latents})",
         )
-        if args.freeze_gmmlp:
-            for param in gmmlp_encoder.parameters():
+        if args.freeze_ppasta:
+            for param in ppasta_encoder.parameters():
                 param.requires_grad = False
-            print("GMMLP encoder frozen (--freeze-gmmlp).")
+            print("PPASTA encoder frozen (--freeze-ppasta).")
 
-    model = MMSLT(
+    model = PASTA(
         config,
         args,
         vision_backbone=args.vision_backbone,
         language_decoder=args.language_decoder,
         gemma4_model_id=args.gemma4_model_id,
-        gmmlp_encoder=gmmlp_encoder,
+        ppasta_encoder=ppasta_encoder,
         local_rank=accelerator.local_process_index,
     )
     if args.language_decoder == "gemma4":
@@ -637,7 +636,7 @@ def main(args, config) -> None:
     lr_llm = args.lr_llm if args.lr_llm is not None else args.lr
 
     def _is_llm(n):
-        return any(k in n for k in ("gemma4", "mbart", "gmmlp_encoder"))
+        return any(k in n for k in ("gemma4", "mbart", "ppasta_encoder"))
 
     def _no_wd(n, p):
         return p.ndim <= 1 or n.endswith(".bias")
@@ -1314,7 +1313,7 @@ if __name__ == "__main__":
     # pre-loaded tensors via the default file-descriptor strategy.
     torch.multiprocessing.set_sharing_strategy("file_system")
 
-    parser = argparse.ArgumentParser("MMSLT script", parents=[get_args_parser()])
+    parser = argparse.ArgumentParser("PASTA script", parents=[get_args_parser()])
     _.parse_file(Path(__file__).resolve().parent)
     hpargparse.bind(parser, _)
     args = parser.parse_args()

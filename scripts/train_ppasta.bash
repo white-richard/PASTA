@@ -31,9 +31,9 @@ FRAME_GRAD_CACHE=""
 
 monitor_cmd "trainppastap" "out/ppasta" python src/train_ppasta.py \
     --batch-size 64 \
-    --epochs 200 \
+    --epochs 25 \
     --opt adamw \
-    --lr 0.005 \
+    --lr 0.001 \
     --min-lr 5e-5 \
     --weight-decay 0.05 \
     --warmup-epochs 7 \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NUM_GPUS=2 # Set to 1 or 2
+NUM_GPUS=1 # Set to 1 or 2
 
 if [[ "${NUM_GPUS}" -ge 2 ]]; then
     export CUDA_VISIBLE_DEVICES=0,1
@@ -18,7 +18,7 @@ GEMMA4_MODEL_ID="google/gemma-4-E2B-it"
 
 VISION_BACKBONE=""
 CONFIG="src/configs/config_mmslt_phoenix.yaml"
-OUTPUT_DIR="out/mmslt"
+OUTPUT_DIR="out/pasta"
 SKIP_VAL="false"
 EVAL_EVERY=5           # run dev evaluation every N epochs
 EVAL_MAX_NEW_TOKENS=80 # Phoenix avg translation ~10 words; 80 is generous
@@ -26,7 +26,7 @@ EVAL_NUM_BEAMS=4       # ignored for gemma4 (greedy), used for mbart
 # Set to true to pass --eval-metrics (extra BLEU-1/2/3 and ROUGE during evaluation).
 EVAL_METRICS="true"
 
-# Optional: path to an MMSLT checkpoint (.pth). When set, run eval-only.
+# Optional: path to a PASTA checkpoint (.pth). When set, run eval-only.
 TEST_CHECKPOINT=""
 
 # Set to "true" to freeze all language decoder (mbart/gemma4) parameters.
@@ -35,18 +35,18 @@ FREEZE_LLM="true"
 # Leave empty to disable.
 DECODER_PROMPT="Übersetze die Gebärden in deutschen Text:"
 
-# Optional: path to a pretrained GMMLP checkpoint (from train_gmmlp.bash).
+# Optional: path to a pretrained PPASTA checkpoint (from train_ppasta.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
-GMMLP_CHECKPOINT="picked_checkpoint_epoch_53_devloss_3p2124.pth"
-# Architecture must match the checkpoint produced by train_gmmlp.bash.
-GMMLP_MODEL_ID="google/gemma-4-E2B-it"
-GMMLP_MODEL_FAMILY="gemma4"
-GMMLP_NUM_LATENTS=64
-GMMLP_NUM_MEDIA_EMBEDS=512
-GMMLP_VISION_CHUNK_SIZE=8
-GMMLP_LORA_R=16
-GMMLP_LORA_ALPHA=32
+PPASTA_CHECKPOINT="out/ppasta/checkpoint_epoch_27_devloss_3p0806.pth"
+# Architecture must match the checkpoint produced by train_ppasta.bash.
+PPASTA_MODEL_ID="google/gemma-4-E2B-it"
+PPASTA_MODEL_FAMILY="gemma4"
+PPASTA_NUM_LATENTS=64
+PPASTA_NUM_MEDIA_EMBEDS=512
+PPASTA_VISION_CHUNK_SIZE=16
+PPASTA_LORA_R=8
+PPASTA_LORA_ALPHA=16
 
 DECODER_ARGS=()
 if [[ "${LANGUAGE_DECODER}" == "gemma4" ]]; then
@@ -55,17 +55,17 @@ else
     DECODER_ARGS+=(--language_decoder mbart)
 fi
 
-GMMLP_ARGS=()
-if [[ -n "${GMMLP_CHECKPOINT}" ]]; then
-    GMMLP_ARGS+=(
-        --gmmlp_checkpoint "${GMMLP_CHECKPOINT}"
-        --gmmlp_model_id "${GMMLP_MODEL_ID}"
-        --gmmlp_model_family "${GMMLP_MODEL_FAMILY}"
-        --gmmlp_num_latents "${GMMLP_NUM_LATENTS}"
-        --gmmlp_num_media_embeds "${GMMLP_NUM_MEDIA_EMBEDS}"
-        --gmmlp_vision_chunk_size "${GMMLP_VISION_CHUNK_SIZE}"
-        --gmmlp_lora_r "${GMMLP_LORA_R}"
-        --gmmlp_lora_alpha "${GMMLP_LORA_ALPHA}"
+PPASTA_ARGS=()
+if [[ -n "${PPASTA_CHECKPOINT}" ]]; then
+    PPASTA_ARGS+=(
+        --ppasta_checkpoint "${PPASTA_CHECKPOINT}"
+        --ppasta_model_id "${PPASTA_MODEL_ID}"
+        --ppasta_model_family "${PPASTA_MODEL_FAMILY}"
+        --ppasta_num_latents "${PPASTA_NUM_LATENTS}"
+        --ppasta_num_media_embeds "${PPASTA_NUM_MEDIA_EMBEDS}"
+        --ppasta_vision_chunk_size "${PPASTA_VISION_CHUNK_SIZE}"
+        --ppasta_lora_r "${PPASTA_LORA_R}"
+        --ppasta_lora_alpha "${PPASTA_LORA_ALPHA}"
     )
 fi
 
@@ -106,7 +106,7 @@ else
     LAUNCH=(python)
 fi
 
-monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
+monitor_cmd "train_pasta" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_pasta.py \
     --batch-size 2 \
     --accum-steps 4 \
     --epochs 100 \
@@ -119,8 +119,8 @@ monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --warmup-epochs 2 \
     --config "${CONFIG}" \
     --vision_backbone "${VISION_BACKBONE}" \
-    --gmmlp_feat_cache "datasets/phoenix-vision_feats/A4B_features" \
-    --gmmlp_n_tokens 0 \
+    --ppasta_feat_cache "datasets/phoenix-vision_feats/A4B_features" \
+    --ppasta_n_tokens 0 \
     --output_dir "${OUTPUT_DIR}" \
     --num_workers 8 \
     --eval_num_workers 4 \
@@ -128,7 +128,7 @@ monitor_cmd "train_mmslt" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_mmslt.py \
     --eval-max-new-tokens "${EVAL_MAX_NEW_TOKENS}" \
     --eval-num-beams "${EVAL_NUM_BEAMS}" \
     "${DECODER_ARGS[@]}" \
-    "${GMMLP_ARGS[@]+"${GMMLP_ARGS[@]}"}" \
+    "${PPASTA_ARGS[@]+"${PPASTA_ARGS[@]}"}" \
     "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}" \
     "${FILTERED_ARGS[@]+"${FILTERED_ARGS[@]}"}" \
     "$@"
