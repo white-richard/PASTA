@@ -158,7 +158,10 @@ def _save_per_video(
     for vid, idx_map in frames.items():
         order = sorted(idx_map.keys())
         vis = torch.stack([idx_map[k] for k in order])
-        torch.save({"vis": vis}, out_dir / f"{vid}.pt")
+        entry: dict = {"vis": vis}
+        if vis.dim() == 3:  # patch features (T, P, D) — save spatial mean as global repr
+            entry["vis_global"] = vis.mean(dim=1)
+        torch.save(entry, out_dir / f"{vid}.pt")
         vids.append(vid)
     torch.save({"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)}, out_dir / "_meta.pt")
 
@@ -201,7 +204,10 @@ def stream_merge_to_dir(
         idx_map = torch.load(vpath, map_location="cpu", weights_only=False)
         order = sorted(idx_map.keys())
         vis = torch.stack([idx_map[k] for k in order])
-        torch.save({"vis": vis}, out_dir / f"{vid}.pt")
+        entry: dict = {"vis": vis}
+        if vis.dim() == 3:  # patch features (T, P, D) — save spatial mean as global repr
+            entry["vis_global"] = vis.mean(dim=1)
+        torch.save(entry, out_dir / f"{vid}.pt")
         vpath.unlink()
         vids.append(vid)
 
