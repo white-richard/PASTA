@@ -26,13 +26,13 @@ fi
 
 monitor_cmd "train_gmmlp" "out/gmmlp" python src/train_gmmlp.py \
     --batch-size 64 \
-    --epochs 100 \
+    --epochs 54 \
     --opt adamw \
-    --lr 3e-3 \
+    --lr 0.0017098 \
     --min-lr 5e-5 \
     --weight-decay 0.05 \
     --warmup-epochs 7 \
-    --finetune "" \
+    --finetune "out/gmmlp/1_checkpoint_epoch_46_devloss_3p2652.pth" \
     --output_dir out/gmmlp \
     --model_id "google/gemma-4-E2B-it" \
     --model_family gemma4 \
