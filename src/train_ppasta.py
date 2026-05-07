@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 import yaml
 from flamingo_pytorch import PerceiverResampler
+from grad_cache.context_managers import RandContext
 from grad_cache.grad_cache import GradCache
 from hpman.m import _
 from loguru import logger
@@ -113,7 +114,9 @@ class PPASTADataset(Dataset):
         self.phase = phase
         self.img_path = config["data"]["img_path"]
         self.max_length = config["data"]["max_length"]
-        self.vis_proj_feats = vis_proj_feats  # {vid_name: {"vis": (T, D_vit)}}
+        self.vis_proj_feats = vis_proj_feats  # {vid_name: {"vis": (T, D_vit), "vis_global": (T, D_vit)}}
+        self.use_global_repr = getattr(args, "use_global_repr", False)
+        self.global_feat_key = getattr(args, "global_feat_key", "vis_global")
 
         self.raw_data = load_dataset_file(path[phase])
         self.siglip_feats = siglip_feats
@@ -141,7 +144,14 @@ class PPASTADataset(Dataset):
 
         if self.vis_proj_feats is not None:
             entry = self.vis_proj_feats[vid_name]
-            vis = entry["vis"]  # (T, D_vit)
+            if self.use_global_repr:
+                vis = entry.get(self.global_feat_key)
+                if vis is None:
+                    vis = entry["vis"]
+                    if vis.dim() == 3:  # (T, P, D) patches → spatial mean → (T, D)
+                        vis = vis.mean(dim=1)
+            else:
+                vis = entry["vis"]  # (T, D_vit) or (T, P, D_vit)
             if len(vis) > self.max_length:
                 idxs = sorted(random.sample(range(len(vis)), self.max_length))
                 vis = vis[idxs]
@@ -216,6 +226,149 @@ def split_ppasta_input(model_input: dict, chunk_size: int) -> list[dict]:
     return split_tgt_input(model_input, chunk_size)
 
 
+class FrameChunkedEncoder:
+    """Two-phase gradient accumulation over ViT frame chunks.
+
+    Applies GradCache's technique at the frame level inside a single encoder
+    call so only one frame chunk's ViT activations live on GPU at a time.
+
+    Not an nn.Module — holds plain references to modules owned by the calling
+    PASTAImageEncoder to avoid double-registering parameters.
+
+    Phase 1 (forward): ViT runs per-chunk under no_grad; all_vis is detached
+    and promoted to a grad leaf; Perceiver runs with full grad on all_vis.
+    Per-chunk pixel_values and RNG states are saved for phase 2.
+
+    Phase 2 (chunked_backward): backward through Perceiver gives all_vis.grad;
+    each ViT chunk is re-run independently with grad to accumulate ViT param
+    gradients, then freed before the next chunk.
+
+    Tradeoff vs. naive path: ~1.5x ViT forward passes; peak VRAM for ViT
+    activations drops from O(total_frame_chunks) to O(1).
+    """
+
+    def __init__(
+        self,
+        vision_tower: nn.Module,
+        perceiver: nn.Module,
+        align_proj: nn.Module | None,
+        image_processor,
+        vision_chunk_size: int,
+        gemma4_max_soft_tokens: int | None,
+        max_frames_with_grad: int,
+    ) -> None:
+        self.vision_tower = vision_tower
+        self.perceiver = perceiver
+        self.align_proj = align_proj
+        self._image_processor = image_processor
+        self.vision_chunk_size = vision_chunk_size
+        self.gemma4_max_soft_tokens = gemma4_max_soft_tokens
+        self.max_frames_with_grad = max_frames_with_grad
+        self._saved: dict | None = None
+
+    def _build_pv(
+        self, chunk: list, device: torch.device, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
+        if self.gemma4_max_soft_tokens is not None:
+            proc_kwargs["max_soft_tokens"] = self.gemma4_max_soft_tokens
+        inputs = self._image_processor(**proc_kwargs).to(device)
+        return inputs["pixel_values"].to(dtype), inputs.get("image_position_ids")
+
+    def _vit_pool(
+        self, pv: torch.Tensor, pos_ids: torch.Tensor | None, n_frames: int
+    ) -> torch.Tensor:
+        """ViT forward + GAP over patches → (n_frames, D_vit)."""
+        vis = self.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
+        if vis.dim() == 2:
+            vis = vis.view(n_frames, vis.shape[0] // n_frames, vis.shape[-1])
+        return vis.mean(dim=1)
+
+    def _perceiver_forward(
+        self, all_vis_leaf: torch.Tensor, video_lengths: list[int]
+    ) -> torch.Tensor:
+        """Perceiver on all_vis_leaf → (B, K, D) normalised tokens."""
+        vid_tokens: list[torch.Tensor] = []
+        start = 0
+        for length in video_lengths:
+            vis_frames = all_vis_leaf[start : start + length]
+            out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(2))  # (1, T, K, D)
+            pooled = out.mean(dim=1)  # (1, K, D)
+            if self.align_proj is not None:
+                pooled = self.align_proj(pooled)
+            vid_tokens.append(F.normalize(pooled, dim=-1))
+            start += length
+        return torch.cat(vid_tokens, dim=0)  # (B, K, D)
+
+    def forward(self, src_input: dict) -> torch.Tensor:
+        """Phase 1: ViT no_grad per frame chunk; Perceiver with grad. Saves chunk state."""
+        images_batch = src_input["images"]
+        device = next(self.perceiver.parameters()).device
+        dtype = next(self.perceiver.parameters()).dtype
+
+        capped: list[list] = []
+        for vid_frames in images_batch:
+            if len(vid_frames) > self.max_frames_with_grad:
+                step = len(vid_frames) / self.max_frames_with_grad
+                vid_frames = [vid_frames[int(i * step)] for i in range(self.max_frames_with_grad)]
+            capped.append(vid_frames)
+
+        video_lengths = [len(f) for f in capped]
+        flat_frames = [f for frames in capped for f in frames]
+
+        saved_chunks: list[tuple] = []
+        vis_pooled_list: list[torch.Tensor] = []
+
+        with torch.no_grad():
+            for i in range(0, len(flat_frames), self.vision_chunk_size):
+                chunk = flat_frames[i : i + self.vision_chunk_size]
+                pv, pos_ids = self._build_pv(chunk, device, dtype)
+                rng = RandContext(pv)
+                vis_pooled_list.append(self._vit_pool(pv, pos_ids, len(chunk)))
+                saved_chunks.append((pv, pos_ids, len(chunk), rng))
+
+        all_vis = torch.cat(vis_pooled_list, dim=0)  # (total_frames, D_vit)
+        all_vis_leaf = all_vis.detach().requires_grad_(True)
+
+        output = self._perceiver_forward(all_vis_leaf, video_lengths)
+
+        self._saved = {
+            "chunks": saved_chunks,
+            "all_vis_leaf": all_vis_leaf,
+            "device": device,
+            "dtype": dtype,
+        }
+        return output
+
+    def chunked_backward(self, surrogate: torch.Tensor) -> None:
+        """Phase 2: backward through Perceiver, then independently through each ViT chunk."""
+        assert self._saved is not None, "chunked_backward() must be called after forward()"
+        saved = self._saved
+        self._saved = None
+
+        all_vis_leaf: torch.Tensor = saved["all_vis_leaf"]
+        device: torch.device = saved["device"]
+        dtype: torch.dtype = saved["dtype"]
+
+        # Step 1: propagate surrogate through Perceiver → all_vis_leaf.grad.
+        surrogate.backward()
+        all_vis_grad = all_vis_leaf.grad  # (total_frames, D_vit)
+
+        # Step 2: re-run each ViT chunk with grad, accumulate param grads, then free.
+        amp_enabled = device.type == "cuda"
+        frame_idx = 0
+        for pv, pos_ids, n_frames, rng in saved["chunks"]:
+            grad_slice = all_vis_grad[frame_idx : frame_idx + n_frames]
+            with rng:
+                with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
+                    vis_pooled = self._vit_pool(pv, pos_ids, n_frames)
+            chunk_surrogate = torch.dot(
+                vis_pooled.flatten().float(), grad_slice.flatten().float()
+            )
+            chunk_surrogate.backward()
+            frame_idx += n_frames
+
+
 class PASTAImageEncoder(nn.Module):
     """SigLIP2 ViT (LoRA) + Perceiver Resampler.
 
@@ -239,11 +392,15 @@ class PASTAImageEncoder(nn.Module):
         image_processor_id: str | None = None,
         align_dim: int | None = None,
         preextracted_vit_dim: int | None = None,
+        use_global_repr: bool = False,
+        use_frame_grad_cache: bool = False,
+        max_frames_with_grad: int = 128,
     ) -> None:
         super().__init__()
         self.vision_chunk_size = vision_chunk_size
+        self.use_global_repr = use_global_repr
         self.gemma4_max_soft_tokens = 70 if model_family == "gemma4" else None
-        self.max_frames_with_grad = 128
+        self.max_frames_with_grad = max_frames_with_grad
         self.model_family = model_family
 
         if preextracted_vit_dim is not None:
@@ -302,7 +459,7 @@ class PASTAImageEncoder(nn.Module):
         self.perceiver = PerceiverResampler(
             dim=vit_hidden,
             depth=4,
-            dim_head=64,
+            dim_head=128,
             heads=8,
             num_latents=num_latents,
             num_media_embeds=num_media_embeds,
@@ -312,6 +469,22 @@ class PASTAImageEncoder(nn.Module):
             self.align_proj: nn.Linear | None = nn.Linear(vit_hidden, align_dim)
         else:
             self.align_proj = None
+
+        self._frame_enc: FrameChunkedEncoder | None = None
+        if use_frame_grad_cache and preextracted_vit_dim is None:
+            self._frame_enc = FrameChunkedEncoder(
+                vision_tower=self.vision_tower,
+                perceiver=self.perceiver,
+                align_proj=self.align_proj,
+                image_processor=self._image_processor,
+                vision_chunk_size=vision_chunk_size,
+                gemma4_max_soft_tokens=self.gemma4_max_soft_tokens,
+                max_frames_with_grad=self.max_frames_with_grad,
+            )
+
+    def chunked_backward(self, surrogate: torch.Tensor) -> None:
+        assert self._frame_enc is not None, "chunked_backward requires use_frame_grad_cache=True"
+        self._frame_enc.chunked_backward(surrogate)
 
     def _forward_preextracted(self, src_input: dict) -> torch.Tensor:
         """Bypass ViT using pre-extracted features; run only the Perceiver.
@@ -323,14 +496,20 @@ class PASTAImageEncoder(nn.Module):
         vid_tokens_list: list[torch.Tensor] = []
         for vis_frames in src_input["vis_feats"]:
             vis_frames = vis_frames.to(device, dtype=dtype, non_blocking=True)
-            # (T, D) gap → (1, T, 1, D); (T, P, D) patches → (1, T, P, D)
-            x = (
-                vis_frames.unsqueeze(0)
-                if vis_frames.dim() == 3
-                else vis_frames.unsqueeze(0).unsqueeze(2)
-            )
-            out = self.perceiver(x)  # (1, T, K, D)
-            pooled = out.mean(dim=1)  # (1, K, D) — collapse temporal dim
+            if self.use_global_repr:
+                # (T, D) → (1, 1, T, D): Perceiver attends across all frames at once
+                x = vis_frames.unsqueeze(0).unsqueeze(0)
+                out = self.perceiver(x)  # (1, 1, K, D)
+                pooled = out.squeeze(1)  # (1, K, D)
+            else:
+                # (T, D) gap → (1, T, 1, D); (T, P, D) patches → (1, T, P, D)
+                x = (
+                    vis_frames.unsqueeze(0)
+                    if vis_frames.dim() == 3
+                    else vis_frames.unsqueeze(0).unsqueeze(2)
+                )
+                out = self.perceiver(x)  # (1, T, K, D)
+                pooled = out.mean(dim=1)  # (1, K, D) — collapse temporal dim
             if self.align_proj is not None:
                 pooled = self.align_proj(pooled)  # (1, K, align_dim)
             vid_tokens_list.append(F.normalize(pooled, dim=-1))  # (1, K, D)
@@ -393,6 +572,16 @@ class PASTAImageEncoder(nn.Module):
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
         feats = src_input["vis_feats"]  # list of (T_i, D_vit) CPU tensors
+
+        if self.use_global_repr:
+            # Process each video individually: (T, D) → (1, 1, T, D)
+            latents_list: list[torch.Tensor] = []
+            for vis_frames in feats:
+                vis_frames = vis_frames.to(device, dtype=dtype, non_blocking=True)
+                out = self.perceiver(vis_frames.unsqueeze(0).unsqueeze(0))  # (1, 1, K, D)
+                latents_list.append(out.squeeze(1))  # (1, K, D)
+            return torch.cat(latents_list, dim=0)  # (B, K, D)
+
         lengths = [len(f) for f in feats]
         max_T = max(lengths)
         B = len(feats)
@@ -425,6 +614,9 @@ class PASTAImageEncoder(nn.Module):
         """Return (B, K, D) L2-normalised Perceiver latents for FILIP."""
         if "vis_feats" in src_input:
             return self._forward_preextracted(src_input)
+
+        if self._frame_enc is not None:
+            return self._frame_enc.forward(src_input)
 
         images_batch = src_input["images"]
         device = next(self.parameters()).device
@@ -492,6 +684,10 @@ class PASTATextEncoder(nn.Module):
         feat = tgt_input["siglip_feat"].float()
         if torch.cuda.is_available():
             feat = feat.cuda()
+        # GradCache needs a grad_fn on the output to call surrogate.backward().
+        # This encoder has no parameters, so we attach requires_grad to the leaf
+        # input; backward computes a gradient for feat but no parameter is updated.
+        feat = feat.requires_grad_(True)
         return F.normalize(feat, dim=-1)  # (B, L, D) or (B, D)
 
 
@@ -516,6 +712,9 @@ class PPASTA(nn.Module):
             image_processor_id=args.image_processor_id or None,
             align_dim=align_dim,
             preextracted_vit_dim=preextracted_vit_dim,
+            use_global_repr=getattr(args, "use_global_repr", False),
+            use_frame_grad_cache=getattr(args, "frame_grad_cache", False),
+            max_frames_with_grad=args.max_frames,
         )
         self.model_text = PASTATextEncoder()
         self.temperature = args.temperature
@@ -640,6 +839,12 @@ def get_args_parser():
         default=8,
         help="Frames sent through ViT at once.",
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=128,
+        help="Max frames per video sent through the ViT. Longer videos are uniformly subsampled.",
+    )
 
     # Loss
     parser.add_argument("--temperature", type=float, default=0.07)
@@ -648,6 +853,15 @@ def get_args_parser():
         type=int,
         default=None,
         help="GradCache chunk size. Defaults to batch-size.",
+    )
+    parser.add_argument(
+        "--frame-grad-cache",
+        action="store_true",
+        help=(
+            "Apply GradCache at the frame level inside the image encoder (live ViT only). "
+            "Only one frame chunk's ViT activations live on GPU at a time. "
+            "Tradeoff: ~1.5x ViT forward passes vs. the naive path."
+        ),
     )
 
     # Features
@@ -671,7 +885,7 @@ def get_args_parser():
     parser.add_argument(
         "--preextracted_feat_dir",
         type=str,
-        default="out/phoenix-vision_feats/A4B_features",
+        default=None,
         help=(
             "Directory containing features_{split}[_spatial{n}tok]/ per-video subdirectories. "
             "When set, the ViT is bypassed during training and only the Perceiver is trained."
@@ -680,11 +894,27 @@ def get_args_parser():
     parser.add_argument(
         "--n-tokens",
         type=int,
-        default=49,
+        default=0,
         help=(
             "Number of spatial patch tokens per frame (from pool_patches_spatial.py). "
             "Loads features_{split}_spatial{n}tok/. Set to 0 to load raw features_{split}/."
         ),
+    )
+    parser.add_argument(
+        "--use-global-repr",
+        action="store_true",
+        help=(
+            "Use the global per-frame representation (key: --global-feat-key) from "
+            "pre-extracted .pt files so the Perceiver attends across all video frames "
+            "at once rather than per-frame with temporal pooling. "
+            "Requires 'vis_global' (or --global-feat-key) in each per-video .pt file."
+        ),
+    )
+    parser.add_argument(
+        "--global-feat-key",
+        type=str,
+        default="vis_global",
+        help="Key in the per-video .pt file for the global per-frame representation (default: vis_global).",
     )
 
     return parser
@@ -714,16 +944,34 @@ def train_one_epoch(
             return filip_loss_fn(v_reps, t_reps, temperature)
         return info_nce(v_reps, t_reps, temperature)
 
-    grad_cache = GradCache(
+    amp_enabled = device.type == "cuda"
+
+    class _GradCache(GradCache):
+        def model_call(self, enc, model_input):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled):
+                return enc(model_input)
+
+        def forward_backward(self, model, model_inputs, cached_gradients, random_states, no_sync_except_last=False):
+            if not hasattr(model, "chunked_backward") or getattr(model, "_frame_enc", None) is None:
+                return super().forward_backward(model, model_inputs, cached_gradients, random_states, no_sync_except_last)
+            for x, state, gradient in zip(model_inputs, random_states, cached_gradients, strict=False):
+                with state:
+                    y = self.model_call(model, x)
+                reps = self.get_reps(y)
+                surrogate = torch.dot(reps.flatten(), gradient.flatten())
+                model.chunked_backward(surrogate)
+
+    grad_cache = _GradCache(
         models=[model.model_image, model.model_text],
         chunk_sizes=[chunk_size, chunk_size],
         loss_fn=_loss_fn,
         split_input_fn=split_ppasta_input,
+        fp16=False,
+        device=device,
     )
 
     optimizer.zero_grad()
     loss_value = 0.0
-    amp_enabled = device.type == "cuda"
 
     for step, (src_input, tgt_input) in enumerate(
         tqdm(
@@ -736,8 +984,7 @@ def train_one_epoch(
             print("DEBUG MODE: stopping after 2 batches.")
             break
 
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled):
-            loss = grad_cache(src_input, tgt_input)
+        loss = grad_cache(src_input, tgt_input)
         optimizer.step()
         optimizer.zero_grad()
 
