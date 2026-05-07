@@ -23,15 +23,23 @@ monitor_cmd() {
   # susceptible to this and survives process-group signals.
   (
     "$@" 2>&1
-  ) >>"${stdout_log}" &
+  ) >"${stdout_log}" &
   local cmd_pid=$!
 
   echo "${cmd_pid}" >"${pid_log}"
+
+  # Kill the command and tail on any exit (Ctrl-C, script error, normal exit).
+  # Without this, Ctrl-C kills the bash script but leaves the python process
+  # running, causing GPU memory leaks and multiplied output on the next run.
+  trap "kill ${cmd_pid} ${tail_pid:-} 2>/dev/null || true; wait ${cmd_pid} 2>/dev/null || true" EXIT INT TERM
 
   # Show live output on the terminal.  This process is expendable: if it
   # dies (SSH disconnect, terminal close) the training is unaffected.
   tail -f "${stdout_log}" &
   local tail_pid=$!
+
+  # Update trap now that tail_pid is known.
+  trap "kill ${cmd_pid} ${tail_pid} 2>/dev/null || true; wait ${cmd_pid} 2>/dev/null || true" EXIT INT TERM
 
   local max_rss_kb=0
   local max_vram_mb=0
