@@ -38,7 +38,7 @@ DECODER_PROMPT="Übersetze die Gebärden in deutschen Text:"
 # Optional: path to a pretrained PPASTA checkpoint (from train_ppasta.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
-PPASTA_CHECKPOINT="out/ppasta/checkpoint_epoch_27_devloss_3p0806.pth"
+PPASTA_CHECKPOINT="checkpoint_epoch_13_devloss_2p9289.pth"
 # Architecture must match the checkpoint produced by train_ppasta.bash.
 PPASTA_MODEL_ID="google/gemma-4-E2B-it"
 PPASTA_MODEL_FAMILY="gemma4"
@@ -109,7 +109,7 @@ fi
 monitor_cmd "train_pasta" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_pasta.py \
     --batch-size 2 \
     --accum-steps 4 \
-    --epochs 100 \
+    --epochs 50 \
     --opt adamw \
     --lr 1e-4 \
     --lr-llm 1e-4 \
