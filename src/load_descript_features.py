@@ -9,7 +9,7 @@ def load_descript_features(
     hidden_layer: int = 20,
     device: torch.device | str = "cpu",
 ) -> dict[str, torch.Tensor]:
-    """Load LLaVA hidden-state features extracted by generate_descript.py.
+    """Load hidden-state features extracted by generate_descript.py.
 
     Args:
         features_dir: Directory containing ``phoenix_hidden_layer{N}_{split}.pt`` files.
