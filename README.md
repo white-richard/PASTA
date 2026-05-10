@@ -31,7 +31,8 @@ datasets/text_phoenix-descript
 └── phoenix_SLdescriptions.train
 ```
 
-### Download How2Sign Dataset (Integration with PASTA TBD)
+### Download How2Sign Dataset 
+Integration with PASTA is in future works.
 
 https://how2sign.github.io/
 
