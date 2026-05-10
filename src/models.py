@@ -246,7 +246,9 @@ class MMSLT(nn.Module):
             self.ppasta_encoder = ppasta_encoder
             ppasta_dim = ppasta_encoder.vit_hidden
             self.projector = Projector(
-                input_dim=ppasta_dim, hidden_dim=planes, output_dim=planes_out
+                input_dim=ppasta_dim,
+                hidden_dim=planes,
+                output_dim=planes_out,
             )
         else:
             self.backbone, backbone_dim = build_backbone(vision_backbone)
@@ -350,14 +352,22 @@ class MMSLT(nn.Module):
             if repetition_penalty != 1.0 and generated.shape[1] > 0:
                 hit = torch.zeros(B, vocab_size, dtype=torch.bool, device=logits.device)
                 hit.scatter_(1, generated.clamp(0, vocab_size - 1), True)
-                penalized = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
+                penalized = torch.where(
+                    logits < 0,
+                    logits * repetition_penalty,
+                    logits / repetition_penalty,
+                )
                 logits = torch.where(hit, penalized, logits)
             if no_repeat_ngram_size > 0 and generated.shape[1] >= no_repeat_ngram_size:
                 n = no_repeat_ngram_size
                 for b in range(B):
                     seq = generated[b].tolist()
-                    prefix = tuple(seq[-(n - 1):])
-                    banned = {seq[i + n - 1] for i in range(len(seq) - (n - 1)) if tuple(seq[i: i + n - 1]) == prefix}
+                    prefix = tuple(seq[-(n - 1) :])
+                    banned = {
+                        seq[i + n - 1]
+                        for i in range(len(seq) - (n - 1))
+                        if tuple(seq[i : i + n - 1]) == prefix
+                    }
                     for tid in banned:
                         logits[b, tid] = -float("inf")
             return logits
@@ -378,7 +388,12 @@ class MMSLT(nn.Module):
         generated = next_token
 
         prefix_len = attention_mask.shape[1]
-        full_mask_buf = torch.ones(B, prefix_len + max_new_tokens, dtype=attention_mask.dtype, device=device)
+        full_mask_buf = torch.ones(
+            B,
+            prefix_len + max_new_tokens,
+            dtype=attention_mask.dtype,
+            device=device,
+        )
         full_mask_buf[:, :prefix_len] = attention_mask
 
         eos_id = self.gemma4.config.text_config.eos_token_id
@@ -401,7 +416,7 @@ class MMSLT(nn.Module):
             logits = _apply_penalties(logits, generated)
             next_token = logits.argmax(dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=1)
-            finished |= (next_token.squeeze(-1) == eos_id)
+            finished |= next_token.squeeze(-1) == eos_id
             if finished.all():
                 break
 
@@ -445,14 +460,19 @@ class MMSLT(nn.Module):
             tgt_ids = tgt_input["input_ids"].cuda()
             tok_embeds = self._g4_text.embed_tokens(tgt_ids)  # (B, L, D)
             combined_embeds = torch.cat(
-                [vis_embeds_with_prompt, tok_embeds], dim=1
+                [vis_embeds_with_prompt, tok_embeds],
+                dim=1,
             )  # (B, T_total+L, D)
             combined_mask = torch.cat(
                 [vis_mask_with_prompt, tgt_input["attention_mask"].cuda()],
                 dim=1,
             )
             per_layer_inputs = self._g4_ple(
-                B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids
+                B,
+                T_total,
+                inputs_embeds.device,
+                inputs_embeds.dtype,
+                tgt_ids,
             )
             outputs = self._g4_text(
                 inputs_embeds=combined_embeds,
@@ -496,7 +516,11 @@ class MMSLT(nn.Module):
                 dim=1,
             )
             per_layer_inputs = self._g4_ple(
-                B, T_total, inputs_embeds.device, inputs_embeds.dtype, tgt_ids
+                B,
+                T_total,
+                inputs_embeds.device,
+                inputs_embeds.dtype,
+                tgt_ids,
             )
             outputs = self._g4_text(
                 inputs_embeds=combined_embeds,

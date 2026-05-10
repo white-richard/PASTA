@@ -27,7 +27,7 @@ args = parser.parse_args()
 
 import yaml
 
-with open(args.config, "r", encoding="utf-8") as f:
+with open(args.config, encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 label_paths = config["data"]["label_path"]
@@ -47,7 +47,9 @@ train_translations = load_translations(label_paths["train"])
 dev_translations = load_translations(label_paths["dev"])
 test_translations = load_translations(label_paths["test"])
 
-print(f"train: {len(train_translations)}  dev: {len(dev_translations)}  test: {len(test_translations)}")
+print(
+    f"train: {len(train_translations)}  dev: {len(dev_translations)}  test: {len(test_translations)}",
+)
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 

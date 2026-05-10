@@ -9,7 +9,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import torch
 import yaml
@@ -23,11 +22,11 @@ if str(_ROOT / "src") not in sys.path:
 @dataclass
 class VideoInfo:
     idx: int
-    key: str          # e.g. "test/24March_2011_..."
-    name: str         # annotation name field
-    video_name: str   # directory name inside fullFrame-210x260px/test/
-    reference: str    # ground-truth German translation
-    num_frames: int   # number of image files
+    key: str  # e.g. "test/24March_2011_..."
+    name: str  # annotation name field
+    video_name: str  # directory name inside fullFrame-210x260px/test/
+    reference: str  # ground-truth German translation
+    num_frames: int  # number of image files
 
 
 @dataclass
@@ -35,12 +34,13 @@ class InferenceResult:
     video_info: VideoInfo
     prediction: str
     reference: str
-    inference_time: float   # seconds
+    inference_time: float  # seconds
 
 
 @dataclass
 class CumulativeStats:
     """Running BLEU-1/2/3/4 and ROUGE-L across all evaluated videos."""
+
     hypotheses: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
     inference_times: list[float] = field(default_factory=list)
@@ -58,13 +58,16 @@ class CumulativeStats:
         if not self.hypotheses:
             return 0.0
         from sacrebleu.metrics import BLEU
+
         metric = BLEU(max_ngram_order=order, effective_order=True)
         return metric.corpus_score(self.hypotheses, [self.references]).score
 
     def rouge_l(self) -> float:
         if not self.hypotheses:
             return 0.0
-        scores = [_rouge_l_sentence(h, r) for h, r in zip(self.hypotheses, self.references)]
+        scores = [
+            _rouge_l_sentence(h, r) for h, r in zip(self.hypotheses, self.references, strict=False)
+        ]
         return sum(scores) / len(scores) * 100.0
 
     def avg_inference_time(self) -> float:
@@ -121,6 +124,7 @@ def load_test_videos(config_path: str, root: Path = _ROOT) -> list[VideoInfo]:
         if not Path(label_path).is_absolute():
             label_path = str(root / label_path)
         from datasets import load_dataset_file
+
         raw = load_dataset_file(label_path)
         for key, val in raw.items():
             vid = key.split("/")[1] if "/" in key else key
@@ -135,14 +139,16 @@ def load_test_videos(config_path: str, root: Path = _ROOT) -> list[VideoInfo]:
             if not d.is_dir():
                 continue
             frames = sorted(d.glob("*.png")) + sorted(d.glob("*.jpg"))
-            videos.append(VideoInfo(
-                idx=idx,
-                key=f"test/{d.name}",
-                name=d.name,
-                video_name=d.name,
-                reference=ground_truth.get(d.name, ""),
-                num_frames=len(frames),
-            ))
+            videos.append(
+                VideoInfo(
+                    idx=idx,
+                    key=f"test/{d.name}",
+                    name=d.name,
+                    video_name=d.name,
+                    reference=ground_truth.get(d.name, ""),
+                    num_frames=len(frames),
+                ),
+            )
     return videos
 
 
@@ -169,7 +175,7 @@ class InferenceEngine:
         eval_max_new_tokens: int = 80,
         eval_num_beams: int = 4,
         device: str = "cuda",
-        on_status: Optional[callable] = None,
+        on_status: callable | None = None,
     ) -> None:
         self._on_status = on_status or (lambda msg: None)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -179,7 +185,9 @@ class InferenceEngine:
         self._config_path_str = config_path
 
         self._on_status("Loading config…")
-        config_full = Path(_ROOT) / config_path if not Path(config_path).is_absolute() else Path(config_path)
+        config_full = (
+            Path(_ROOT) / config_path if not Path(config_path).is_absolute() else Path(config_path)
+        )
         with open(config_full, encoding="utf-8") as f:
             self.config = yaml.load(f, Loader=yaml.FullLoader)
 
@@ -187,9 +195,11 @@ class InferenceEngine:
         self._on_status("Loading tokenizer…")
         if language_decoder == "gemma4":
             from transformers import AutoTokenizer
+
             self.tokenizer = AutoTokenizer.from_pretrained(gemma4_model_id)
         else:
             from transformers import MBart50TokenizerFast
+
             self.tokenizer = MBart50TokenizerFast.from_pretrained(
                 "facebook/mbart-large-50-many-to-many-mmt",
                 src_lang="de_DE",
@@ -199,7 +209,6 @@ class InferenceEngine:
 
         # ── GMMLP encoder (optional) ──────────────────────────────────────
         self._on_status("Loading GMMLP encoder…" if gmmlp_checkpoint else "Skipping GMMLP encoder…")
-        import gc
         gmmlp_encoder = None
         if gmmlp_checkpoint:
             from train_gmmlp import GMMLPImageEncoder
@@ -226,7 +235,9 @@ class InferenceEngine:
             )
             ckpt = torch.load(gmmlp_checkpoint, map_location="cpu", weights_only=False)
             prefix = "model_image."
-            encoder_state = {k[len(prefix):]: v for k, v in ckpt["model"].items() if k.startswith(prefix)}
+            encoder_state = {
+                k[len(prefix) :]: v for k, v in ckpt["model"].items() if k.startswith(prefix)
+            }
             gmmlp_encoder.load_state_dict(encoder_state, strict=False)
 
         # ── MMSLT model ───────────────────────────────────────────────────
@@ -234,6 +245,7 @@ class InferenceEngine:
 
         # Build a minimal args namespace for MMSLT
         import argparse
+
         args = argparse.Namespace(
             vision_backbone=vision_backbone,
             language_decoder=language_decoder,
@@ -245,6 +257,7 @@ class InferenceEngine:
         )
 
         from models import MMSLT
+
         self.model = MMSLT(
             self.config,
             args,
@@ -270,7 +283,9 @@ class InferenceEngine:
 
         # ── Dataset (test split, for ground truth + frame paths) ──────────
         self._on_status("Loading test annotations…")
-        self._gmmlp_feat_cache = Path(gmmlp_feat_cache) / "features_test" if gmmlp_feat_cache else None
+        self._gmmlp_feat_cache = (
+            Path(gmmlp_feat_cache) / "features_test" if gmmlp_feat_cache else None
+        )
         self._use_gmmlp = bool(gmmlp_encoder)
         self._load_test_data()
 
@@ -327,21 +342,28 @@ class InferenceEngine:
             # Fast path: load pre-extracted ViT features from cache
             pt_path = self._gmmlp_feat_cache / f"{video.video_name}.pt"
             if not pt_path.exists():
-                raise FileNotFoundError(
+                msg = (
                     f"GMMLP feature cache missing for {video.video_name}.\n"
                     f"Expected: {pt_path}\n"
                     "Run with --preextract_gmmlp first."
                 )
+                raise FileNotFoundError(
+                    msg,
+                )
             data = torch.load(pt_path, map_location="cpu", weights_only=False)
             vis_feats = data["vis"] if isinstance(data, dict) else data  # (T, P, D) or (T, D)
-            return {"vis_feats": [vis_feats], "name_batch": [video.video_name],
-                    "src_length_batch": torch.tensor([len(vis_feats)])}
+            return {
+                "vis_feats": [vis_feats],
+                "name_batch": [video.video_name],
+                "src_length_batch": torch.tensor([len(vis_feats)]),
+            }
 
         # Scan video directory for frames (works for both GMMLP PIL and standard backbone)
         frame_dir = Path(self._img_root) / "test" / video.video_name
         img_paths = sorted(frame_dir.glob("*.png")) + sorted(frame_dir.glob("*.jpg"))
         if not img_paths:
-            raise FileNotFoundError(f"No frames found in {frame_dir}")
+            msg = f"No frames found in {frame_dir}"
+            raise FileNotFoundError(msg)
 
         import cv2
         import numpy as np
@@ -360,16 +382,20 @@ class InferenceEngine:
 
         # Standard backbone path
         from torchvision import transforms
+
         max_length = self.config["data"].get("max_length", 150)
         if len(img_paths) > max_length:
             import random
+
             selected = sorted(random.sample(range(len(img_paths)), k=max_length))
             img_paths = [img_paths[i] for i in selected]
 
-        data_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
+        data_transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ],
+        )
         imgs = []
         for p in img_paths:
             img = cv2.imread(str(p))

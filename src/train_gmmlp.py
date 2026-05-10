@@ -37,7 +37,6 @@ from datasets import load_dataset_file
 from definition import *
 from grad_cache_util import (
     GradCacheWithGrounding,
-    contrastive_loss_fn,
     filip_loss_fn,
     split_tgt_input,
 )
@@ -392,7 +391,11 @@ class GMMLPImageEncoder(nn.Module):
         for vis_frames in src_input["vis_feats"]:
             vis_frames = vis_frames.to(device, dtype=dtype, non_blocking=True)
             # (T, D) gap → (1, T, 1, D); (T, P, D) patches → (1, T, P, D)
-            x = vis_frames.unsqueeze(0) if vis_frames.dim() == 3 else vis_frames.unsqueeze(0).unsqueeze(2)
+            x = (
+                vis_frames.unsqueeze(0)
+                if vis_frames.dim() == 3
+                else vis_frames.unsqueeze(0).unsqueeze(2)
+            )
             out = self.perceiver(x)  # (1, T, K, D)
             pooled = out.mean(dim=1)  # (1, K, D) — collapse temporal dim
             if self.align_proj is not None:
@@ -469,21 +472,22 @@ class GMMLPImageEncoder(nn.Module):
         if feats[0].dim() == 3:
             n_patches = feats[0].shape[1]
             padded = torch.zeros(B, max_T, n_patches, D, dtype=dtype, device=device)
-            for i, (f, t) in enumerate(zip(feats, lengths)):
+            for i, (f, t) in enumerate(zip(feats, lengths, strict=False)):
                 padded[i, :t] = f[:t].to(dtype=dtype, non_blocking=True)
         else:
             padded = torch.zeros(B, max_T, 1, D, dtype=dtype, device=device)
-            for i, (f, t) in enumerate(zip(feats, lengths)):
+            for i, (f, t) in enumerate(zip(feats, lengths, strict=False)):
                 padded[i, :t, 0, :] = f[:t].to(dtype=dtype, non_blocking=True)
 
         # One Perceiver call for the whole batch: (B, max_T, K, D)
         out = self.perceiver(padded)
 
         # Masked mean over T to ignore padding
-        mask = torch.arange(max_T, device=device).unsqueeze(0) < torch.tensor(lengths, device=device).unsqueeze(1)
+        mask = torch.arange(max_T, device=device).unsqueeze(0) < torch.tensor(
+            lengths, device=device
+        ).unsqueeze(1)
         mask = mask[:, :, None, None].to(dtype)  # (B, max_T, 1, 1)
-        pooled = (out * mask).sum(dim=1) / mask.sum(dim=1)  # (B, K, D)
-        return pooled
+        return (out * mask).sum(dim=1) / mask.sum(dim=1)  # (B, K, D)
 
     def forward(self, src_input: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (sentence_emb, student_vid).
@@ -1237,7 +1241,9 @@ def main(args, config) -> None:
 
     # Final eval on best checkpoint
     if args.output_dir and not args.skip_validation:
-        ckpt = torch.load(str(output_dir / "best_checkpoint.pth"), map_location="cpu", weights_only=False)
+        ckpt = torch.load(
+            str(output_dir / "best_checkpoint.pth"), map_location="cpu", weights_only=False
+        )
         model.load_state_dict(ckpt["model"], strict=True)
         for split, loader in [("dev", dev_loader), ("test", test_loader)]:
             stats = evaluate(args, loader, model, epoch, device)

@@ -78,9 +78,9 @@ class Gemma4(nn.Module):
             config = AutoConfig.from_pretrained(hf_model_id)
             with init_empty_weights():
                 empty = Gemma4ForConditionalGeneration(config)
-                
+
             total_vram = torch.cuda.get_device_properties(0).total_memory
-            
+
             device_map = infer_auto_device_map(
                 empty,
                 max_memory={0: total_vram * 4, "cpu": 200 * 1024**3},

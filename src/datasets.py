@@ -244,10 +244,15 @@ class S2T_Dataset(Dataset):
             # collate_fn when the ViT is not loaded).
             full_len = len(self.list)
             self.list = [
-                key for key in self.list
-                if (self.ppasta_feat_dir / f"{key.split('/')[1] if '/' in key else key}.pt").exists()
+                key
+                for key in self.list
+                if (
+                    self.ppasta_feat_dir / f"{key.split('/')[1] if '/' in key else key}.pt"
+                ).exists()
             ]
-            print(f"  [{phase}] lazy PPASTA features from {self.ppasta_feat_dir.name}/ ({len(self.list)}/{full_len} found)")
+            print(
+                f"  [{phase}] lazy PPASTA features from {self.ppasta_feat_dir.name}/ ({len(self.list)}/{full_len} found)",
+            )
 
         def sometimes(aug):
             return va.Sometimes(
@@ -394,7 +399,11 @@ class S2T_Dataset(Dataset):
                 truncation=True,
             )
             src_length_batch = torch.tensor([len(v) for v in vis_feats_batch])
-            return {"vis_feats": vis_feats_batch, "name_batch": name_batch, "src_length_batch": src_length_batch}, tgt_input
+            return {
+                "vis_feats": vis_feats_batch,
+                "name_batch": name_batch,
+                "src_length_batch": src_length_batch,
+            }, tgt_input
 
         tgt_batch, txt_tmp, src_length_batch, name_batch, img_tmp = [], [], [], [], []
         pil_frames_batch = [] if self.use_ppasta_backbone else None

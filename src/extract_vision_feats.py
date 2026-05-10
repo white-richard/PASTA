@@ -163,7 +163,10 @@ def _save_per_video(
             entry["vis_global"] = vis.mean(dim=1)
         torch.save(entry, out_dir / f"{vid}.pt")
         vids.append(vid)
-    torch.save({"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)}, out_dir / "_meta.pt")
+    torch.save(
+        {"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)},
+        out_dir / "_meta.pt",
+    )
 
 
 def stream_merge_to_dir(
@@ -189,7 +192,11 @@ def stream_merge_to_dir(
         for vid, idx_map in data["frames"].items():
             vpath = partial_dir / f"{vid}.pt"
             if vpath.exists():
-                existing: dict[int, torch.Tensor] = torch.load(vpath, map_location="cpu", weights_only=False)
+                existing: dict[int, torch.Tensor] = torch.load(
+                    vpath,
+                    map_location="cpu",
+                    weights_only=False,
+                )
                 existing.update(idx_map)
                 torch.save(existing, vpath)
             else:
@@ -212,7 +219,10 @@ def stream_merge_to_dir(
         vids.append(vid)
 
     partial_dir.rmdir()
-    torch.save({"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)}, out_dir / "_meta.pt")
+    torch.save(
+        {"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(vids)},
+        out_dir / "_meta.pt",
+    )
     print(f"  wrote {len(vids)} per-video files")
 
 
@@ -268,14 +278,21 @@ def run_extract(args) -> None:
     def _flush(batch_idx: int) -> None:
         if not frame_feats:
             return
-        ckpt = save_path / f"_shard{args.shard_id}of{args.num_shards}_{args.split}_ckpt{batch_idx}.pt"
-        torch.save({"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": dict(frame_feats)}, ckpt)
+        ckpt = (
+            save_path / f"_shard{args.shard_id}of{args.num_shards}_{args.split}_ckpt{batch_idx}.pt"
+        )
+        torch.save(
+            {"d_vit": d_vit, "feature_mode": args.feature_mode, "frames": dict(frame_feats)},
+            ckpt,
+        )
         checkpoint_files.append(ckpt)
         frame_feats.clear()
         print(f"  [flush] {ckpt.name}")
 
     with torch.inference_mode():
-        for batch_idx, (pvs, pos_ids, vids, idxs) in enumerate(tqdm(loader, desc=f"shard {args.shard_id}")):
+        for batch_idx, (pvs, pos_ids, vids, idxs) in enumerate(
+            tqdm(loader, desc=f"shard {args.shard_id}"),
+        ):
             pv = pvs.to(device, dtype=torch.bfloat16, non_blocking=True)
             if pos_ids is not None:
                 pos_ids = pos_ids.to(device, non_blocking=True)
@@ -349,7 +366,9 @@ def run_merge(args) -> None:
         {"d_vit": d_vit, "feature_mode": feature_mode, "vids": sorted(all_vids)},
         out_dir / "_meta.pt",
     )
-    print(f"Saved → {out_dir}  (videos={len(all_vids)}, D_vit={d_vit}, feature_mode={feature_mode})")
+    print(
+        f"Saved → {out_dir}  (videos={len(all_vids)}, D_vit={d_vit}, feature_mode={feature_mode})",
+    )
 
 
 def run_finalize_checkpoints(args) -> None:

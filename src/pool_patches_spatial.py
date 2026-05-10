@@ -33,7 +33,7 @@ from tqdm import tqdm
 def _best_factors(n: int) -> tuple[int, int]:
     """Return (H, W) with H <= W, H*W == n, minimising W - H (nearest to square)."""
     best = (1, n)
-    for h in range(1, int(math.isqrt(n)) + 1):
+    for h in range(1, math.isqrt(n) + 1):
         if n % h == 0:
             best = (h, n // h)
     return best

@@ -114,7 +114,9 @@ class PPASTADataset(Dataset):
         self.phase = phase
         self.img_path = config["data"]["img_path"]
         self.max_length = config["data"]["max_length"]
-        self.vis_proj_feats = vis_proj_feats  # {vid_name: {"vis": (T, D_vit), "vis_global": (T, D_vit)}}
+        self.vis_proj_feats = (
+            vis_proj_feats  # {vid_name: {"vis": (T, D_vit), "vis_global": (T, D_vit)}}
+        )
         self.use_global_repr = getattr(args, "use_global_repr", False)
         self.global_feat_key = getattr(args, "global_feat_key", "vis_global")
 
@@ -267,7 +269,10 @@ class FrameChunkedEncoder:
         self._saved: dict | None = None
 
     def _build_pv(
-        self, chunk: list, device: torch.device, dtype: torch.dtype
+        self,
+        chunk: list,
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         proc_kwargs: dict = {"images": chunk, "return_tensors": "pt"}
         if self.gemma4_max_soft_tokens is not None:
@@ -276,7 +281,10 @@ class FrameChunkedEncoder:
         return inputs["pixel_values"].to(dtype), inputs.get("image_position_ids")
 
     def _vit_pool(
-        self, pv: torch.Tensor, pos_ids: torch.Tensor | None, n_frames: int
+        self,
+        pv: torch.Tensor,
+        pos_ids: torch.Tensor | None,
+        n_frames: int,
     ) -> torch.Tensor:
         """ViT forward + GAP over patches → (n_frames, D_vit)."""
         vis = self.vision_tower(pv, pixel_position_ids=pos_ids).last_hidden_state
@@ -285,7 +293,9 @@ class FrameChunkedEncoder:
         return vis.mean(dim=1)
 
     def _perceiver_forward(
-        self, all_vis_leaf: torch.Tensor, video_lengths: list[int]
+        self,
+        all_vis_leaf: torch.Tensor,
+        video_lengths: list[int],
     ) -> torch.Tensor:
         """Perceiver on all_vis_leaf → (B, K, D) normalised tokens."""
         vid_tokens: list[torch.Tensor] = []
@@ -363,7 +373,8 @@ class FrameChunkedEncoder:
                 with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
                     vis_pooled = self._vit_pool(pv, pos_ids, n_frames)
             chunk_surrogate = torch.dot(
-                vis_pooled.flatten().float(), grad_slice.flatten().float()
+                vis_pooled.flatten().float(),
+                grad_slice.flatten().float(),
             )
             chunk_surrogate.backward()
             frame_idx += n_frames
@@ -951,15 +962,34 @@ def train_one_epoch(
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp_enabled):
                 return enc(model_input)
 
-        def forward_backward(self, model, model_inputs, cached_gradients, random_states, no_sync_except_last=False):
+        def forward_backward(
+            self,
+            model,
+            model_inputs,
+            cached_gradients,
+            random_states,
+            no_sync_except_last=False,
+        ):
             if not hasattr(model, "chunked_backward") or getattr(model, "_frame_enc", None) is None:
-                return super().forward_backward(model, model_inputs, cached_gradients, random_states, no_sync_except_last)
-            for x, state, gradient in zip(model_inputs, random_states, cached_gradients, strict=False):
+                return super().forward_backward(
+                    model,
+                    model_inputs,
+                    cached_gradients,
+                    random_states,
+                    no_sync_except_last,
+                )
+            for x, state, gradient in zip(
+                model_inputs,
+                random_states,
+                cached_gradients,
+                strict=False,
+            ):
                 with state:
                     y = self.model_call(model, x)
                 reps = self.get_reps(y)
                 surrogate = torch.dot(reps.flatten(), gradient.flatten())
                 model.chunked_backward(surrogate)
+            return None
 
     grad_cache = _GradCache(
         models=[model.model_image, model.model_text],

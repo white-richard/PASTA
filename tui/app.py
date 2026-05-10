@@ -252,6 +252,7 @@ VimListView > ListItem.evaluated.--highlight {
 
 # ── Messages ─────────────────────────────────────────────────────────────────
 
+
 class VideosLoaded(Message):
     pass
 
@@ -280,6 +281,7 @@ class StatusUpdate(Message):
 
 
 # ── Widgets ───────────────────────────────────────────────────────────────────
+
 
 class VideoListItem(ListItem):
     def __init__(self, video_info, *args, **kwargs) -> None:
@@ -312,6 +314,7 @@ class VimListView(ListView):
 
 # ── Main app ─────────────────────────────────────────────────────────────────
 
+
 class MMSLTApp(App):
     """Claude Code-styled TUI for evaluating MMSLT sign language translation."""
 
@@ -335,8 +338,8 @@ class MMSLTApp(App):
         self._all_videos: list = []
         self._filtered_videos: list = []
         self._running_all = False
-        self._list_items: dict = {}          # video_name → VideoListItem
-        self._evaluated_names: set = set()   # video_names already evaluated
+        self._list_items: dict = {}  # video_name → VideoListItem
+        self._evaluated_names: set = set()  # video_names already evaluated
 
     # ── Composition ───────────────────────────────────────────────────────
 
@@ -387,7 +390,11 @@ class MMSLTApp(App):
         """Scan the test directory and populate the list before the model loads."""
         try:
             from tui.inference import load_test_videos
-            config_path = self._engine_kwargs.get("config_path", "src/configs/config_mmslt_phoenix.yaml")
+
+            config_path = self._engine_kwargs.get(
+                "config_path",
+                "src/configs/config_mmslt_phoenix.yaml",
+            )
             videos = load_test_videos(config_path)
             self._all_videos = videos
             self._filtered_videos = list(videos)
@@ -400,7 +407,7 @@ class MMSLTApp(App):
     @work(thread=True)
     def _load_model(self) -> None:
         try:
-            from tui.inference import InferenceEngine, CumulativeStats
+            from tui.inference import CumulativeStats, InferenceEngine
 
             def on_status(msg: str) -> None:
                 self.post_message(StatusUpdate(msg, "loading"))
@@ -449,9 +456,7 @@ class MMSLTApp(App):
         if not query:
             self._filtered_videos = list(self._all_videos)
         else:
-            self._filtered_videos = [
-                v for v in self._all_videos if query in v.video_name.lower()
-            ]
+            self._filtered_videos = [v for v in self._all_videos if query in v.video_name.lower()]
         self._populate_list(self._filtered_videos)
 
     def action_focus_search(self) -> None:
@@ -518,24 +523,32 @@ class MMSLTApp(App):
         self.query_one("#ref-text", Static).update(result.reference or "[dim](empty)[/dim]")
 
         # Per-video metrics
-        from tui.inference import _rouge_l_sentence
         from sacrebleu.metrics import BLEU
-        b4 = BLEU(max_ngram_order=4, effective_order=True).sentence_score(
-            result.prediction, [result.reference]
-        ).score
+
+        from tui.inference import _rouge_l_sentence
+
+        b4 = (
+            BLEU(max_ngram_order=4, effective_order=True)
+            .sentence_score(
+                result.prediction,
+                [result.reference],
+            )
+            .score
+        )
         rl = _rouge_l_sentence(result.prediction, result.reference) * 100
         self.query_one("#video-metrics", Static).update(
             f"[dim]This video:[/dim]  "
             f"BLEU-4 [bold]{b4:.1f}[/bold]  "
             f"ROUGE-L [bold]{rl:.1f}[/bold]  "
             f"Time [bold]{result.inference_time:.2f}s[/bold]  "
-            f"Frames [bold]{result.video_info.num_frames}[/bold]"
+            f"Frames [bold]{result.video_info.num_frames}[/bold]",
         )
 
         # Update cumulative stats
         self._refresh_stats()
         self._set_status(
-            f"Done  ({self._stats.count} evaluated) — {result.inference_time:.2f}s", "ready"
+            f"Done  ({self._stats.count} evaluated) — {result.inference_time:.2f}s",
+            "ready",
         )
 
     @on(InferenceError)
@@ -543,7 +556,7 @@ class MMSLTApp(App):
         short = event.error.splitlines()[-1] if event.error else "Unknown error"
         self._set_status(f"Error: {short}", "error")
         self.query_one("#pred-text", Static).update(
-            f"[bold red]Error:[/bold red] {event.error}"
+            f"[bold red]Error:[/bold red] {event.error}",
         )
         self._running_all = False
 
@@ -561,9 +574,12 @@ class MMSLTApp(App):
         for i, video in enumerate(videos):
             if not self._running_all:
                 break
-            self.post_message(StatusUpdate(
-                f"Running all: {i + 1}/{len(videos)} — {video.video_name}…", "running"
-            ))
+            self.post_message(
+                StatusUpdate(
+                    f"Running all: {i + 1}/{len(videos)} — {video.video_name}…",
+                    "running",
+                ),
+            )
             try:
                 result = self._engine.run_single(video)
                 self.post_message(InferenceDone(result))
@@ -598,6 +614,7 @@ class MMSLTApp(App):
 
 # ── Formatting helpers ────────────────────────────────────────────────────────
 
+
 def _format_stats_empty() -> str:
     return (
         "[dim]No videos evaluated yet.[/dim]\n"
@@ -626,6 +643,7 @@ def _format_stats(s) -> str:
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
+
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -660,6 +678,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     # Change to project root so relative paths in config work
     import os
+
     os.chdir(_ROOT)
     sys.path.insert(0, str(_ROOT / "src"))
 
