@@ -1,4 +1,7 @@
-# ASL VLM Project
+# Serving PASTA: Learning to Translate Sign Language in 85 Million Forward Passes
+Implementation for Perceiver-Aligned Sign-to-Text Architecture (PASTA), 
+a video-to-text sign language translation framework which maps sign videos to 
+spoken language sentences.
 
 ## Setup
 
@@ -28,7 +31,7 @@ datasets/text_phoenix-descript
 └── phoenix_SLdescriptions.train
 ```
 
-### Download How2Sign Dataset
+### Download How2Sign Dataset (Integration with PASTA TBD)
 
 https://how2sign.github.io/
 
