@@ -120,3 +120,15 @@ bash scripts/descript_embed.bash
 Encodes the generated descriptions with SigLIP2, producing fixed-size embeddings for downstream use.
 
 **Output:** `out/datasets/`
+
+---
+
+## Acknowledgements & Citation
+
+This project is based on the code and method from:
+
+> **Leveraging the Power of MLLMs for Gloss-Free Sign Language Translation**
+> Jeon et al., ICCV 2025
+> [https://github.com/hwjeon98/MMSLT](https://github.com/hwjeon98/MMSLT)
+
+If you use this code, please also cite the original MMSLT work.
