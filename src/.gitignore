@@ -1,8 +1,0 @@
-SLdescriptions/
-data/
-log/
-*.pt
-*.ckpt
-*.bin
-*.npy
-*.npz

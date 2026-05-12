@@ -1,4 +1,5 @@
-.venv/bin/python src/train_mmslt.py \
+# TODO: removed logic in pasta by mistake 
+.venv/bin/python src/train_pasta.py \
     --eval \
     --resume best_checkpoint_phoenix.pth \
     --language_decoder mbart \

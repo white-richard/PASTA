@@ -7,12 +7,12 @@ source "$(dirname "$0")/slib/monitor_cmd.bash"
 # === Config ===
 HF_MODEL_ID="google/gemma-4-26B-A4B-it"
 IMG_PATH="datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px/"
-SAVE_PATH="out/phoenix-vision_feats/A4B_features"
+SAVE_PATH="datasets/phoenix-vision_feats_pooled/A4B_features"
 BATCH_SIZE=128
 NUM_WORKERS=8
-FEATURE_MODE="all_patches"
-MAX_SOFT_TOKENS=70 # 70→63 ViT tokens (7×9), 140→~126, 280→~252 per frame
-DEBUG=false        # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
+FEATURE_MODE="gap"
+MAX_SOFT_TOKENS=70  # 70→63 ViT tokens (7×9), 140→~126, 280→~252 per frame
+DEBUG=false  # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
 SPLITS=(train dev test)
 # ==============
 

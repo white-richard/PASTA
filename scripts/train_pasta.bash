@@ -38,7 +38,7 @@ DECODER_PROMPT="Übersetze die Gebärden in deutschen Text:"
 # Optional: path to a pretrained PPASTA checkpoint (from train_ppasta.bash).
 # When set, the SigLIP2 ViT + Perceiver from that checkpoint replaces
 # VISION_BACKBONE. Leave empty to use the standard backbone.
-PPASTA_CHECKPOINT="checkpoint_epoch_13_devloss_2p9289.pth"
+PPASTA_CHECKPOINT="out/ppasta/best_checkpoint.pth"
 # Architecture must match the checkpoint produced by train_ppasta.bash.
 PPASTA_MODEL_ID="google/gemma-4-E2B-it"
 PPASTA_MODEL_FAMILY="gemma4"
