@@ -3,7 +3,6 @@ import datetime
 import json
 import os
 import random
-import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -29,16 +28,10 @@ from transformers import (
     MBart50TokenizerFast,
 )
 
-import utils
-from datasets import S2T_Dataset
-from definition import *
-from models import MMSLT as PASTA
-
-try:
-    from nlgeval import compute_metrics
-except Exception:
-    compute_metrics = None
-    logger.warning("nlgeval is not installed; extra eval metrics will be skipped.")
+from . import utils
+from .datasets import S2T_Dataset
+from .definition import PAD_IDX, SPECIAL_SYMBOLS, UNK_IDX
+from .models import PASTA
 
 try:
     import psutil
@@ -202,18 +195,12 @@ def get_args_parser():
         help="LR decay rate (default: 0.1)",
     )
 
-    # * Baise params
     parser.add_argument("--output_dir", default="", help="path where to save, empty for no saving")
     parser.add_argument("--device", default="cuda", help="device to use for training / testing")
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--resume", default="", help="resume from checkpoint")
     parser.add_argument("--start_epoch", default=0, type=int, metavar="N", help="start epoch")
     parser.add_argument("--eval", action="store_true", help="Perform evaluation only")
-    parser.add_argument(
-        "--eval-metrics",
-        action="store_true",
-        help="Compute extra BLEU-1/2/3 and ROUGE metrics during evaluation.",
-    )
     parser.add_argument(
         "--skip_val",
         action="store_true",
@@ -267,7 +254,12 @@ def get_args_parser():
     )
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem", help="")
     parser.set_defaults(pin_mem=True)
-    parser.add_argument("--config", type=str, default="src/configs/config_mmslt_phoenix.yaml")
+    parser.add_argument("--config", type=str, default="configs/phoenix2014t.yaml")
+    parser.add_argument(
+        "--wandb-project",
+        default="pasta-slt",
+        help="Weights & Biases project name; logging mode is controlled by the YAML config.",
+    )
     parser.add_argument(
         "--log-memory",
         action="store_true",
@@ -310,9 +302,6 @@ def get_args_parser():
         default="resnet18",
         help="Vision vision_backbone name. Use 'dummy' for a tiny random-weight model.",
     )
-
-    # * visualization
-    parser.add_argument("--visualize", action="store_true")
 
     # * debug
     parser.add_argument(
@@ -436,7 +425,7 @@ def main(args, config) -> None:
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(args.gemma4_model_id)
-        # Causal LM needs right-padding so the vision→text junction is correct:
+        # Causal LM needs right-padding so the vision to text junction is correct:
         # with left-padding, the last vis hidden state learns to predict PAD (0)
         # instead of the first real text token, which tanks generation quality.
         tokenizer.padding_side = "right"
@@ -514,7 +503,7 @@ def main(args, config) -> None:
     ppasta_encoder = None
     if args.ppasta_checkpoint:
         print(f"Loading PPASTA encoder from {args.ppasta_checkpoint} …")
-        from train_ppasta import PASTAImageEncoder
+        from .train_ppasta import PPASTAImageEncoder
 
         # When a feature cache is available, read D_vit from its metadata so we
         # can build a Perceiver-only encoder
@@ -530,7 +519,7 @@ def main(args, config) -> None:
             preextracted_vit_dim = meta["d_vit"]
             print(f"  Perceiver-only mode: D_vit={preextracted_vit_dim} (ViT not loaded)")
 
-        ppasta_encoder = PASTAImageEncoder(
+        ppasta_encoder = PPASTAImageEncoder(
             model_id=args.ppasta_model_id,
             model_family=args.ppasta_model_family,
             lora_r=args.ppasta_lora_r,
@@ -740,7 +729,7 @@ def main(args, config) -> None:
             accelerator=accelerator,
         )
         print(
-            f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f} ",
+            f"BLEU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['bleu4']:.2f} ",
         )
         test_stats = evaluate(
             args,
@@ -758,7 +747,7 @@ def main(args, config) -> None:
             accelerator=accelerator,
         )
         print(
-            f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
+            f"BLEU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['bleu4']:.2f}",
         )
         return
 
@@ -827,7 +816,7 @@ def main(args, config) -> None:
             )
             if accelerator.is_main_process:
                 print(
-                    f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+                    f"BLEU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['bleu4']:.2f}",
                 )
 
             dev_loss = test_stats.get("loss")
@@ -842,8 +831,8 @@ def main(args, config) -> None:
                 )
                 torch.save(state, devloss_checkpoint)
 
-            if max_accuracy < test_stats["belu4"]:
-                max_accuracy = test_stats["belu4"]
+            if max_accuracy < test_stats["bleu4"]:
+                max_accuracy = test_stats["bleu4"]
                 if args.output_dir and accelerator.is_main_process:
                     state = {
                         "model": model_without_ddp.state_dict(),
@@ -875,7 +864,7 @@ def main(args, config) -> None:
                         )
 
             if accelerator.is_main_process:
-                print(f"Max BELU-4: {max_accuracy:.2f}%")
+                print(f"Max BLEU-4: {max_accuracy:.2f}%")
 
         if accelerator.is_main_process:
             wandb_payload = {
@@ -889,7 +878,7 @@ def main(args, config) -> None:
                         "dev/Bleu_1": test_stats.get("bleu1", 0.0),
                         "dev/Bleu_2": test_stats.get("bleu2", 0.0),
                         "dev/Bleu_3": test_stats.get("bleu3", 0.0),
-                        "dev/Bleu_4": test_stats["belu4"],
+                        "dev/Bleu_4": test_stats["bleu4"],
                         "dev/Best_Bleu_4": max_accuracy,
                         "dev/ROUGE_L": test_stats.get("rouge_l", 0.0),
                         "dev/inference_time_per_video_s": test_stats.get(
@@ -955,7 +944,7 @@ def main(args, config) -> None:
         )
         if accelerator.is_main_process:
             print(
-                f"BELU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['belu4']:.2f}",
+                f"BLEU-4 of the network on the {len(dev_dataloader)} dev videos: {test_stats['bleu4']:.2f}",
             )
 
         test_stats = evaluate(
@@ -975,7 +964,7 @@ def main(args, config) -> None:
         )
         if accelerator.is_main_process:
             print(
-                f"BELU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['belu4']:.2f}",
+                f"BLEU-4 of the network on the {len(test_dataloader)} test videos: {test_stats['bleu4']:.2f}",
             )
 
         # Single-video memory benchmark (same video every run: test_data[0])
@@ -1099,9 +1088,6 @@ def train_one_epoch(
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(lr_llm=round(float(optimizer.param_groups[-1]["lr"]), 8))
 
-        if (step + 1) % 10 == 0 and args.visualize:
-            utils.visualization(model.visualize())
-
         if args.debug and step >= 1:
             if accelerator.is_main_process:
                 print("*** DEBUG MODE: stopping after 2 batches ***")
@@ -1203,9 +1189,6 @@ def evaluate(
                 else:
                     print(f"[memory] step={step + 1} rss={rss_gb}")
 
-            if (step + 1) % 10 == 0 and args.visualize and _is_main:
-                utils.visualization(model_without_ddp.visualize())
-
             if args.debug and step >= 1:
                 if _is_main:
                     print("*** DEBUG MODE: stopping after 2 batches ***")
@@ -1216,7 +1199,7 @@ def evaluate(
     for n in range(1, 5):
         b = BLEU(max_ngram_order=n)
         bleu_scores[f"bleu{n}"] = b.corpus_score(tgt_pres, [tgt_refs]).score
-    metric_logger.meters["belu4"].update(bleu_scores["bleu4"])
+    metric_logger.meters["bleu4"].update(bleu_scores["bleu4"])
 
     # ROUGE-L (corpus-level average of sentence F1, scaled to 0-100)
     _rouge_scorer = _rouge_module.RougeScorer(["rougeL"], use_stemmer=False)
@@ -1236,44 +1219,6 @@ def evaluate(
     total_video_secs = total_video_frames / fps
     inference_rtf = total_gen_time / total_video_secs if total_video_secs > 0 else 0.0
 
-    if args.eval_metrics and compute_metrics is not None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            hyp_path = os.path.join(tmp_dir, "tmp_pres.txt")
-            ref_path = os.path.join(tmp_dir, "tmp_refs.txt")
-            with open(hyp_path, "w") as f:
-                f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
-            with open(ref_path, "w") as f:
-                f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
-            if _is_main:
-                print("\n" + "*" * 80)
-            metrics = compute_metrics(
-                hypothesis=hyp_path,
-                references=[ref_path],
-                no_skipthoughts=True,
-                no_glove=True,
-            )
-            if _is_main:
-                print("*" * 80)
-
-        def _maybe_pct(value):
-            if value is None:
-                return None
-            return value * 100.0 if value <= 1.0 else value
-
-        bleu1 = _maybe_pct(metrics.get("Bleu_1"))
-        bleu2 = _maybe_pct(metrics.get("Bleu_2"))
-        bleu3 = _maybe_pct(metrics.get("Bleu_3"))
-        rouge_l = _maybe_pct(metrics.get("ROUGE_L"))
-
-        if bleu1 is not None:
-            metric_logger.update(bleu1=bleu1)
-        if bleu2 is not None:
-            metric_logger.update(bleu2=bleu2)
-        if bleu3 is not None:
-            metric_logger.update(bleu3=bleu3)
-        if rouge_l is not None:
-            metric_logger.update(rouge_l=rouge_l)
-
     metric_logger.synchronize_between_processes()
     if _is_main:
         print(
@@ -1284,20 +1229,6 @@ def evaluate(
             f"gen: {avg_time_per_video:.3f}s/video  rtf: {inference_rtf:.3f}s/s",
         )
 
-    if args.eval and compute_metrics is not None and _is_main:
-        with open(args.output_dir + "/tmp_pres.txt", "w") as f:
-            f.writelines(tgt_pres[i] + "\n" for i in range(len(tgt_pres)))
-        with open(args.output_dir + "/tmp_refs.txt", "w") as f:
-            f.writelines(tgt_refs[i] + "\n" for i in range(len(tgt_refs)))
-        print("\n" + "*" * 80)
-        compute_metrics(
-            hypothesis=args.output_dir + "/tmp_pres.txt",
-            references=[args.output_dir + "/tmp_refs.txt"],
-            no_skipthoughts=True,
-            no_glove=True,
-        )
-        print("*" * 80)
-
     return {
         **{k: meter.global_avg for k, meter in metric_logger.meters.items()},
         **bleu_scores,
@@ -1307,23 +1238,23 @@ def evaluate(
     }
 
 
-if __name__ == "__main__":
+def cli() -> None:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    # Avoid "Too many open files" when DataLoader workers share thousands of
-    # pre-loaded tensors via the default file-descriptor strategy.
     torch.multiprocessing.set_sharing_strategy("file_system")
 
-    parser = argparse.ArgumentParser("PASTA script", parents=[get_args_parser()])
+    parser = argparse.ArgumentParser("PASTA", parents=[get_args_parser()])
     _.parse_file(Path(__file__).resolve().parent)
     hpargparse.bind(parser, _)
     args = parser.parse_args()
 
-    with open(args.config, "r+", encoding="utf-8") as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+    with open(args.config, encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
 
-    os.environ["WANDB_MODE"] = config["training"]["wandb"] if not args.eval else "disabled"
-    wandb.init(project="", config=config)
-    wandb.run.name = args.output_dir.split("/")[-1]
+    wandb_mode = "disabled" if args.eval else config.get("training", {}).get("wandb", "disabled")
+    os.environ["WANDB_MODE"] = wandb_mode
+    run = wandb.init(project=args.wandb_project, config=config)
+    if run is not None and args.output_dir:
+        run.name = Path(args.output_dir).name
     wandb.define_metric("epoch")
     wandb.define_metric("training/*", step_metric="epoch")
     wandb.define_metric("dev/*", step_metric="epoch")
@@ -1332,3 +1263,7 @@ if __name__ == "__main__":
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     main(args, config)
+
+
+if __name__ == "__main__":
+    cli()

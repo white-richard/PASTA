@@ -95,13 +95,13 @@ def filip_loss_fn(v_tokens: Tensor, t_tokens: Tensor, temperature: float = 0.07)
     # Padding mask for text: real tokens have unit norm; padded zeros map to zero.
     t_mask = t_tokens.norm(dim=-1) > 1e-6  # (N, L) bool
 
-    # --- v→t: for each text token l find best video token k, then mean over l ---
+    # v->t: for each text token l find best video token k, then mean over l
     # sim.max(dim=2).values: (N_v, N_t, L)
     max_over_k = sim.max(dim=2).values  # (Nv, Nt, L)
     t_mask_j = t_mask.unsqueeze(0).float()  # (1, Nt, L)  — broadcast over Nv
     sim_vt = (max_over_k * t_mask_j).sum(dim=-1) / t_mask_j.sum(dim=-1).clamp(min=1)
 
-    # --- t→v: for each video token k find best *real* text token l, then mean over k ---
+    # t->v: for each video token k find best real text token l, then mean over k
     # Mask padded text positions to -inf before taking max.
     sim_tv_masked = sim.masked_fill(
         ~t_mask.unsqueeze(0).unsqueeze(2),

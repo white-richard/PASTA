@@ -33,17 +33,16 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoImageProcessor
 
-import utils
-from datasets import load_dataset_file
-from definition import *
-from grad_cache_util import filip_loss_fn, split_tgt_input
+from . import utils
+from .datasets import load_dataset_file
+from .grad_cache_util import filip_loss_fn, split_tgt_input
 
 
 class LazyFeatureDir:
     """Lazy per-video loader that mimics a {vid: {"vis": tensor}} dict interface.
 
     Backed by a directory of per-video .pt files produced by extract_vision_feats.py
-    or pool_patches_spatial.py.  Keeps a set of known video IDs for fast membership
+    or pool_patches_spatial.py. Keeps a set of known video IDs for fast membership
     tests; the actual tensor is only read from disk when __getitem__ is called.
     """
 
@@ -64,31 +63,27 @@ class LazyFeatureDir:
         return len(self._vids)
 
 
-def load_siglip_features(path: str | Path, return_type: str = "pool") -> dict[str, torch.Tensor]:
-    """Load SigLIP text token features.
+def load_siglip_features(
+    path: str | Path,
+    representation: str = "tokens",
+) -> dict[str, torch.Tensor]:
+    """Load precomputed SigLIP2 translation features.
 
-    Args:
-        path: Pathlib path to the .pt file containing the SigLIP features.
-        return_type: "pool" (default) to return mean-pooled video-level features (D,);
-                     or "token" to return token-level features (L, D) without pooling.
-
-    File format: {vid_name: {"siglip2_token_feat": (n_translations, L, D)}}
-
-    Returns {vid_name: (L, D)} if return_type is "token".
-    Returns {vid_name: (D,)} if return_type is "pool" (mean-pooled over tokens).
-
+    translation_embed.py stores a leading translation dimension even when a
+    Phoenix sample has one reference. tokens removes that dimension and
+    returns (L, D) features for FILIP. pooled returns the model's pooled
+    text representation as (D,).
     """
+    if representation not in {"tokens", "pooled"}:
+        raise ValueError("representation must be 'tokens' or 'pooled'")
+
     data = torch.load(path, weights_only=False)
-    out = {}
+    out: dict[str, torch.Tensor] = {}
+    key = "siglip2_token_feat" if representation == "tokens" else "siglip2_feat"
     for vid, entry in data.items():
-        if "siglip2_token_feat" not in entry:
-            msg = f"Video {vid} missing 'siglip2_token_feat' key in {path}."
-            raise KeyError(msg)
-        if return_type == "pool":
-            out[vid] = entry["siglip2_token_feat"].float().mean(dim=0)  # (L, D)
-        elif return_type == "token":
-            key = "siglip2_feat"
-            out[vid] = entry[key].float().mean(dim=0)  # (D,)
+        if key not in entry:
+            raise KeyError(f"Video {vid} missing {key!r} in {path}.")
+        out[vid] = entry[key].float().mean(dim=0)
     return out
 
 
@@ -96,7 +91,7 @@ class PPASTADataset(Dataset):
     """Loads PIL frames or pre-extracted ViT features + SigLIP text feats.
 
     When vis_proj_feats is provided (pre-extracted ViT features from
-    extract_siglip_gap.py), PIL image loading is skipped entirely and the
+    extract_vision_feats.py), PIL image loading is skipped entirely and the
     stored (T, D_vit) tensors are returned instead.
     """
 
@@ -235,7 +230,7 @@ class FrameChunkedEncoder:
     call so only one frame chunk's ViT activations live on GPU at a time.
 
     Not an nn.Module — holds plain references to modules owned by the calling
-    PASTAImageEncoder to avoid double-registering parameters.
+    PPASTAImageEncoder to avoid double-registering parameters.
 
     Phase 1 (forward): ViT runs per-chunk under no_grad; all_vis is detached
     and promoted to a grad leaf; Perceiver runs with full grad on all_vis.
@@ -245,7 +240,7 @@ class FrameChunkedEncoder:
     each ViT chunk is re-run independently with grad to accumulate ViT param
     gradients, then freed before the next chunk.
 
-    Tradeoff vs. naive path: ~1.5x ViT forward passes; peak VRAM for ViT
+    ~1.5x ViT forward passes; peak VRAM for ViT
     activations drops from O(total_frame_chunks) to O(1).
     """
 
@@ -380,7 +375,7 @@ class FrameChunkedEncoder:
             frame_idx += n_frames
 
 
-class PASTAImageEncoder(nn.Module):
+class PPASTAImageEncoder(nn.Module):
     """SigLIP2 ViT (LoRA) + Perceiver Resampler.
 
     forward() → (B, K, D) L2-normalised Perceiver latents for FILIP.
@@ -529,7 +524,7 @@ class PASTAImageEncoder(nn.Module):
     def forward_latents(self, src_input: dict) -> torch.Tensor:
         """Return (B, K, D_vit) Perceiver latents (before CLS pooling).
 
-        Used by downstream translation models (e.g. MMSLT) that need a
+        Used by downstream translation models (e.g. PASTA) that need a
         sequence of latent tokens rather than a single pooled embedding.
         Supports both PIL image mode (src_input["images"]) and pre-extracted
         mode (src_input["vis_feats"]).
@@ -683,7 +678,7 @@ class PASTAImageEncoder(nn.Module):
         return torch.cat(vid_tokens_list, dim=0)  # (B, K, D)
 
 
-class PASTATextEncoder(nn.Module):
+class PPASTATextEncoder(nn.Module):
     """Pass-through for pre-extracted SigLIP token embeddings.
 
     Returns (B, L, D) L2-normalised token tensors for FILIP, or (B, D) for
@@ -711,7 +706,7 @@ class PPASTA(nn.Module):
         preextracted_vit_dim: int | None = None,
     ) -> None:
         super().__init__()
-        self.model_image = PASTAImageEncoder(
+        self.model_image = PPASTAImageEncoder(
             model_id=args.model_id,
             model_family=args.model_family,
             lora_r=args.lora_r,
@@ -727,7 +722,7 @@ class PPASTA(nn.Module):
             use_frame_grad_cache=getattr(args, "frame_grad_cache", False),
             max_frames_with_grad=args.max_frames,
         )
-        self.model_text = PASTATextEncoder()
+        self.model_text = PPASTATextEncoder()
         self.temperature = args.temperature
 
     def forward(self, src_input: dict, tgt_input: dict) -> torch.Tensor:
@@ -796,7 +791,7 @@ def get_args_parser():
     parser.add_argument("--no-pin-mem", action="store_false", dest="pin_mem")
     parser.set_defaults(pin_mem=False)  # PIL lists can't be pinned
     parser.add_argument("--log-memory", action="store_true")
-    parser.add_argument("--config", type=str, default="src/configs/config_mmslt_phoenix.yaml")
+    parser.add_argument("--config", type=str, default="configs/phoenix2014t.yaml")
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -1333,18 +1328,21 @@ def main(args, config) -> None:
     print(f"Training time {datetime.timedelta(seconds=int(total_time))}")
 
 
-if __name__ == "__main__":
+def cli() -> None:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
     parser = argparse.ArgumentParser("PPASTA", parents=[get_args_parser()])
     _.parse_file(Path(__file__).resolve().parent)
     hpargparse.bind(parser, _)
     args = parser.parse_args()
 
-    with open(args.config, encoding="utf-8") as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+    with open(args.config, encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
 
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
 
     main(args, config)
+
+
+if __name__ == "__main__":
+    cli()

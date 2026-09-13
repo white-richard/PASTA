@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoConfig, AutoProcessor, Gemma4ForConditionalGeneration
 
-from datasets import VideoDataset
+from .datasets import VideoDataset
 
 _ST_DTYPE = {
     "F64": (torch.float64, 8),
@@ -404,13 +404,13 @@ def main() -> None:
     p.add_argument("--hf-model-id", default="google/gemma-4-26B-A4B-it")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--num-workers", type=int, default=8)
-    p.add_argument("--save_path", default="out/gmmlp_features/")
+    p.add_argument("--save_path", default="datasets/phoenix-vision_feats_pooled/A4B_features")
     p.add_argument("--num-shards", type=int, default=1)
     p.add_argument("--shard-id", type=int, default=0)
     p.add_argument(
         "--merge",
         action="store_true",
-        help="stitch shard files into features_{split}.pt",
+        help="merge shard outputs into the final features_{split}/ directory",
     )
     p.add_argument(
         "--feature-mode",

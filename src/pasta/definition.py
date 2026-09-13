@@ -1,4 +1,3 @@
-# global definition
 UNK_TOKEN = "<unk>"
 PAD_TOKEN = "<pad>"
 BOS_TOKEN = "<bos>"

@@ -1,27 +1,16 @@
-# from utils import create_mask
 import timm
 import torch
-import torch.nn.functional as F
-import torch.utils.checkpoint
 import torchvision
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
-
-# import pytorchvideo.models.x3d as x3d
-
-""" PyTorch MBART model."""
-
-import numpy as np
-from hpman.m import _
 from transformers import (
     BitsAndBytesConfig,
     Gemma4ForConditionalGeneration,
     MBartForConditionalGeneration,
 )
 
-# global definition
-from definition import *
+from .definition import PAD_IDX
 
 
 def make_resnet(name="resnet18"):
@@ -34,8 +23,7 @@ def make_resnet(name="resnet18"):
     elif name == "resnet101":
         model = torchvision.models.resnet101(weights=torchvision.models.ResNet101_Weights.DEFAULT)
     else:
-        msg = "There are no supported resnet model {}.".format(_("resnet"))
-        raise Exception(msg)
+        raise ValueError(f"Unsupported ResNet backbone: {name}")
 
     model.fc = nn.Identity()
     # model.fc = nn.Linear(inchannel, 768)
@@ -180,7 +168,7 @@ class Projector(nn.Module):
         return self.encoder(x)
 
 
-class MMSLT(nn.Module):
+class PASTA(nn.Module):
     def __init__(
         self,
         config,
@@ -588,126 +576,3 @@ class MMSLT(nn.Module):
             repetition_penalty=repetition_penalty,
             no_repeat_ngram_size=no_repeat_ngram_size,
         )
-
-
-class TextEncoder(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-
-        self.grad_cache = True
-        self.model_txt = MBartForConditionalGeneration.from_pretrained(
-            "facebook/mbart-large-50-many-to-many-mmt",
-        ).get_encoder()
-        for param in self.model_txt.parameters():
-            param.requires_grad = False
-
-    def forward(self, tgt_input):
-        # If using gradcahe, then is not needed
-        if self.grad_cache:
-            txt_logits = self.model_txt(
-                input_ids=tgt_input["input_ids"].cuda(),
-                attention_mask=tgt_input["attention_mask"].cuda(),
-            )[0]
-        else:
-            with torch.no_grad():
-                txt_logits = self.model_txt(
-                    input_ids=tgt_input["input_ids"].cuda(),
-                    attention_mask=tgt_input["attention_mask"].cuda(),
-                )[0]
-
-        return txt_logits.mean(dim=1)  # [b, 1024]
-
-
-class ImageEncoder(nn.Module):
-    def __init__(self, inplanes=768, planes=1024, head_type="linear", backbone="resnet18") -> None:
-        super().__init__()
-
-        self.backbone, backbone_dim = build_backbone(backbone)
-        # Description mapper
-        self.descriptproj = Projector(
-            input_dim=backbone_dim,
-            hidden_dim=planes,
-            output_dim=inplanes,
-        )
-        # Modality Adapter
-        self.conv = TemporalConv(
-            input_size=backbone_dim + inplanes,
-            hidden_size=planes,
-            conv_type=2,
-        )
-        self.projector = Projector(input_dim=planes, hidden_dim=planes, output_dim=planes)
-        # Multimodal encoder
-        self.trans_encoder = MBartForConditionalGeneration.from_pretrained(
-            "facebook/mbart-large-50-many-to-many-mmt",
-        ).get_encoder()
-        lora_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
-            target_modules=[
-                "q_proj",
-                "v_proj",
-                "k_proj",
-                "out_proj",
-            ],  # Apply LoRA to query and value layers
-            lora_dropout=0.1,
-            bias="none",
-            task_type="FEATURE_EXTRACTION",
-        )
-        self.trans_encoder = get_peft_model(self.trans_encoder, lora_config)
-
-    def forward(self, src_input):
-
-        tgt_descript = to_btc(src_input["input_descript"].cuda(), src_input["src_length_batch"])
-        img_feature = self.backbone(src_input["input_img"].cuda(), src_input["src_length_batch"])
-        descript_feature = self.descriptproj(img_feature)
-        mse_loss = F.mse_loss(descript_feature, tgt_descript)
-
-        inputs_embeds = torch.cat([img_feature, descript_feature], dim=-1)
-        inputs_embeds = self.conv(inputs_embeds)
-        inputs_embeds = self.projector(inputs_embeds)
-
-        attention_mask = src_input["attention_mask"]
-
-        outs = self.trans_encoder(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask.cuda(),
-            return_dict=True,
-        )
-        last_hidden_state = outs["last_hidden_state"]
-        # output = last_hidden_state[:, 0, :] #[b, 1024]
-        output = last_hidden_state.mean(dim=1)
-
-        return output, mse_loss
-
-
-class MMLP(nn.Module):
-    def __init__(self, config, embed_dim=1024, vision_backbone="resnet18") -> None:
-        super().__init__()
-        self.model_text = TextEncoder()
-        self.model_image = ImageEncoder(inplanes=768, planes=embed_dim, backbone=vision_backbone)
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-
-    def encode_sign(self, src_input):
-        """Returns (normalized_sign_embedding, mse_loss)."""
-        output, mse_loss = self.model_image(src_input)
-        return F.normalize(output, p=2, dim=-1), mse_loss
-
-    def encode_text(self, tgt_input):
-        """Returns normalized text embedding."""
-        output = self.model_text(tgt_input)
-        return F.normalize(output, p=2, dim=-1)
-
-    def forward(self, src_input, tgt_input):
-        text_features = self.model_text(tgt_input)
-        image_features, descript_loss = self.model_image(src_input)
-
-        # normalized features
-        norm_text = F.normalize(text_features, p=2, dim=-1)
-        norm_images = F.normalize(image_features, p=2, dim=-1)
-
-        # cosine similarity as logits
-        logit_scale = self.logit_scale.exp()
-        sim_text = torch.matmul(norm_text, norm_images.t()) * logit_scale
-        sim_image = torch.matmul(norm_images, norm_text.t()) * logit_scale
-
-        return sim_text, sim_image, descript_loss
