@@ -362,7 +362,7 @@ def get_args_parser():
         "--ppasta_n_tokens",
         type=int,
         default=0,
-        help="Number of spatial patch tokens per frame (from pool_patches_spatial.py). "
+        help="Number of spatial patch tokens per frame. "
         "Selects features_{split}_spatial{n}tok/ subdirectory. 0 = raw features_{split}/.",
     )
     parser.add_argument(

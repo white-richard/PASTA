@@ -110,7 +110,7 @@ Output:
 out/ppasta/best_checkpoint.pth
 ```
 
-### 4. Train PASTA
+### Train PASTA
 
 ```bash
 bash scripts/train_pasta.bash

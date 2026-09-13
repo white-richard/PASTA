@@ -803,10 +803,9 @@ def get_args_parser():
     parser.add_argument(
         "--model_family",
         choices=["llava", "gemma4"],
-        default="llava",
+        default="gemma4",
         help=(
             "Model family to use as the visual backbone. "
-            "'llava' (default): LLaVA-OneVision — SigLIP ViT + LLaVA MLP projector. "
             "'gemma4': Gemma 4 — SigLIP2 ViT + Gemma MLP projector. "
             "Set --model_id to the matching HuggingFace repo "
             "(e.g. 'google/gemma-4-4b-it' for gemma4)."
@@ -887,7 +886,7 @@ def get_args_parser():
         help="Path to siglip2 text features .pt for test split (default: translation embeddings).",
     )
 
-    # Pre-extracted ViT features (from extract_vision_feats.py + pool_patches_spatial.py)
+    # Pre-extracted ViT features
     parser.add_argument(
         "--preextracted_feat_dir",
         type=str,
@@ -902,7 +901,7 @@ def get_args_parser():
         type=int,
         default=0,
         help=(
-            "Number of spatial patch tokens per frame (from pool_patches_spatial.py). "
+            "Number of spatial patch tokens per frame. "
             "Loads features_{split}_spatial{n}tok/. Set to 0 to load raw features_{split}/."
         ),
     )
