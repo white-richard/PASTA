@@ -1,16 +1,57 @@
-# Serving PASTA: Learning to Translate Sign Language in 85 Million Forward Passes
+# PASTA
 
-Implementation for Perceiver-Aligned Sign-to-Text Architecture (PASTA),
-a video-to-text sign language translation framework which maps sign videos to
-spoken language sentences.
+PASTA (Perceiver-Aligned Sign-to-Text Architecture) is a pipeline for gloss-free sign language translation on RWTH-PHOENIX-Weather 2014T. The current implementation extracts frame-level visual features, aligns video representations with German translation embeddings during PPASTA pretraining, and then finetunes a sequence-to-sequence translation model.
 
-## Setup
+## Pipeline
 
-**Prerequisites:** `uv` ([install](https://docs.astral.sh/uv/getting-started/installation/)) and `git`.
+```text
+Phoenix video frames
+        |
+        v
+Gemma 4 vision tower
+        |
+        +--> cached frame features ------------------+
+                                                     |
+German translations --> text embeddings              |
+        |                                            |
+        +-----------------> PPASTA <-----------------+
+                              |
+                              v
+                    Perceiver visual encoder
+                              |
+                              v
+                         PASTA training
+                              |
+                              v
+                    German text translation
+```
 
-### Download Phoenix dataset
+PPASTA uses a FILIP-style contrastive objective between Perceiver video tokens and precomputed SigLIP2 translation-token features. PASTA then loads the pretrained visual encoder and projects its latent tokens into the language decoder's embedding space. The supported training path uses Gemma 4 but retains an mBART decoder option.
 
-Run this in a `tmux` session — it takes a few hours:
+## Repository layout
+
+```text
+configs/                  Phoenix dataset configuration
+scripts/                  Supported entry points
+src/pasta/                Installable PASTA package
+tests/                    Data and repository tests
+```
+
+## Environment
+
+The checked-in environment targets Python 3.12, PyTorch 2.6, and the CUDA 12.4 PyTorch wheel index. Training is intended for NVIDIA GPUs.
+
+Install [uv](https://docs.astral.sh/uv/) and clone the repository with its GradCache submodule:
+
+```bash
+git submodule update --init --recursive
+uv sync --extra tui --extra dev
+uv pip install -e repos/gradcache
+```
+
+### Dataset
+
+Download RWTH-PHOENIX-Weather 2014T into `datasets/`:
 
 ```bash
 mkdir -p datasets
@@ -21,114 +62,85 @@ rm phoenix-2014-T.v3.tar.gz
 cd ..
 ```
 
-> **Note:** Video description labels are available on [GoogleDrive](https://drive.google.com/drive/folders/1Vymg9G7io2sGMBhyWJWCCiF65iI_qik1?usp=drive_link), but are not used in the current iteration of PASTA and do not need to be downloaded.
+The expected annotation and frame paths are defined in `configs/phoenix2014t.yaml`.
 
-### Download How2Sign Dataset
+## Reproduce training
 
-> **Note:** How2Sign integration is planned for future work; download is not necessary.
+Run the stages in order. Model IDs, batch sizes, GPU selection, and output paths are near the top of each shell script.
 
-If you do want to prepare it, download train/validation/test splits from [how2sign.github.io](https://how2sign.github.io/) — specifically the **Green Screen RGB clips (frontal view)** and **English Translation (manually re-aligned)** — and place them under `datasets/how2sign/`.
-
-### Install dependencies
-
-```bash
-git submodule update --init --recursive
-uv sync
-uv pip install -e repos/gradcache
-```
-
----
-
-## Reproducing PASTA
-
-The pipeline runs in four sequential stages. Each stage saves its outputs to a known path so the next stage can pick them up.
-
-### Step 1 — Extract vision features
+### Extract visual features
 
 ```bash
 bash scripts/extract_vision_feats.bash
 ```
 
-Runs the SigLIP2 ViT (backed by Gemma-4) over every frame in the Phoenix train/dev/test splits.
-Extraction is sharded across all available GPUs in parallel; shards are merged automatically at the end of each split.
+The extraction script shards each Phoenix split across the visible GPUs and merges the results after each split.
 
-**Output:** `datasets/phoenix-vision_feats_pooled/A4B_features/`
+Output:
 
----
+```text
+datasets/phoenix-vision_feats_pooled/A4B_features/features_{train,dev,test}/
+```
 
-### Step 2 — Embed translations
+### Embed the reference translations
 
 ```bash
 bash scripts/translation_embed.bash
 ```
 
-Encodes the ground-truth German translation sentences using SigLIP2's text encoder.
-These embeddings are used as the text side of the FILIP contrastive objective during PPASTA pretraining.
+This creates SigLIP2 pooled and token-level embeddings for the German reference translations.
 
-**Output:** `datasets/phoenix-translations/`
+Output:
 
----
+```text
+datasets/phoenix-translations/phoenix_translations_siglip2_{train,dev,test}.pt
+```
 
-### Step 3 — PPASTA pretraining
+### Pretrain PPASTA
 
 ```bash
 bash scripts/train_ppasta.bash
 ```
 
-Trains the Perceiver cross-attention module and a LoRA adapter on the vision encoder using a FILIP-style contrastive loss between the pooled video features (Step 1) and the translation embeddings (Step 2).
-This stage aligns the visual representation space with the language decoder's embedding space before full sequence-to-sequence training.
+PPASTA trains the Perceiver alignment stage against the translation embeddings. The default script consumes the cached visual features from [step 1](<README#Extract visual features>) instead of running the vision tower again.
 
-**Output:** `out/ppasta/best_checkpoint.pth`
+Output:
 
----
+```text
+out/ppasta/best_checkpoint.pth
+```
 
-### Step 4 — PASTA training
+### 4. Train PASTA
 
 ```bash
 bash scripts/train_pasta.bash
 ```
 
-Fine-tunes the full sign-to-text model end-to-end.
-The pretrained PPASTA backbone (Step 3) initialises the SigLIP2 ViT and Perceiver.
-A frozen Gemma-4 (or mBART) language decoder is conditioned on the Perceiver output tokens to generate German translations.
-Supports single- and dual-GPU training via `NUM_GPUS` in the script.
+The finetuning script loads the PPASTA checkpoint and cached visual features, then trains the sign-to-text translation model. Set `NUM_GPUS` in the script to select the single- or two-GPU launch path.
 
-**Output:** `out/pasta/best_checkpoint.pth`
+Output:
 
----
-
-## Optional: Description generation (not required)
-
-These steps generate and embed VLM-produced visual descriptions of the signing videos.
-They are **not used in the current iteration of PASTA** and can be skipped.
-
-### Generate descriptions
-
-```bash
-bash scripts/generate_descript.bash
+```text
+out/pasta/best_checkpoint.pth
 ```
 
-Runs a vision-language model (Gemma-4) over each video to produce natural-language descriptions of the signing content.
-Descriptions and their hidden-state embeddings are saved to `tmp/`.
-
-### Embed descriptions
+To evaluate an existing PASTA checkpoint without starting a training run:
 
 ```bash
-bash scripts/descript_embed.bash
+bash scripts/train_pasta.bash --test-checkpoint out/pasta/best_checkpoint.pth
 ```
 
-Encodes the generated descriptions with SigLIP2, producing fixed-size embeddings for downstream use.
+Evaluation reports BLEU-1 through BLEU-4, ROUGE-L, generation time per video, and real-time factor.
 
-**Output:** `out/datasets/`
+## Current scope
 
----
+The maintained path is Phoenix-2014T only. How2Sign/ASL experiments and generated video descriptions are not part of the current pipeline.
 
-## Acknowledgements & Citation
+## Background and credit
 
-This project is based on the code and method from:
+PASTA started from the MMSLT project by Jeon et al. and keeps some code adapted from that repository alongside the PASTA/PPASTA experiments:
 
-> **Leveraging the Power of MLLMs for Gloss-Free Sign Language Translation**
-> Jeon et al., ICCV 2025
-> [https://github.com/hwjeon98/MMSLT](https://github.com/hwjeon98/MMSLT)
+> H. Jeon et al., **Leveraging the Power of MLLMs for Gloss-Free Sign Language Translation**, ICCV 2025.  
+> https://github.com/hwjeon98/MMSLT
 
-If you use this code, please also cite the original MMSLT work.
+If you build on this repository, please cite the original MMSLT work.
