@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
 NUM_GPUS=1 # Set to 1 or 2
 
 if [[ "${NUM_GPUS}" -ge 2 ]]; then
@@ -17,14 +20,12 @@ LANGUAGE_DECODER="gemma4" # mbart | gemma4
 GEMMA4_MODEL_ID="google/gemma-4-E2B-it"
 
 VISION_BACKBONE=""
-CONFIG="src/configs/config_mmslt_phoenix.yaml"
+CONFIG="configs/phoenix2014t.yaml"
 OUTPUT_DIR="out/pasta"
 SKIP_VAL="false"
 EVAL_EVERY=5           # run dev evaluation every N epochs
 EVAL_MAX_NEW_TOKENS=80 # Phoenix avg translation ~10 words; 80 is generous
 EVAL_NUM_BEAMS=4       # ignored for gemma4 (greedy), used for mbart
-# Set to true to pass --eval-metrics (extra BLEU-1/2/3 and ROUGE during evaluation).
-EVAL_METRICS="true"
 
 # Optional: path to a PASTA checkpoint (.pth). When set, run eval-only.
 TEST_CHECKPOINT=""
@@ -87,9 +88,6 @@ EXTRA_ARGS=()
 if [[ "${SKIP_VAL}" == "true" ]]; then
     EXTRA_ARGS+=(--skip_val)
 fi
-if [[ "${EVAL_METRICS}" == "true" ]]; then
-    EXTRA_ARGS+=(--eval-metrics)
-fi
 if [[ -n "${TEST_CHECKPOINT}" ]]; then
     EXTRA_ARGS+=(--eval --resume "${TEST_CHECKPOINT}")
 fi
@@ -101,12 +99,12 @@ if [[ -n "${DECODER_PROMPT}" ]]; then
 fi
 
 if [[ "${NUM_GPUS}" -ge 2 ]]; then
-    LAUNCH=(accelerate launch --num_processes "${NUM_GPUS}")
+    LAUNCH=(uv run accelerate launch --num_processes "${NUM_GPUS}")
 else
-    LAUNCH=(python)
+    LAUNCH=(uv run python)
 fi
 
-monitor_cmd "train_pasta" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_pasta.py \
+monitor_cmd "train_pasta" "${OUTPUT_DIR}" "${LAUNCH[@]}" -m pasta.train_pasta \
     --batch-size 2 \
     --accum-steps 4 \
     --epochs 50 \
@@ -119,7 +117,7 @@ monitor_cmd "train_pasta" "${OUTPUT_DIR}" "${LAUNCH[@]}" src/train_pasta.py \
     --warmup-epochs 2 \
     --config "${CONFIG}" \
     --vision_backbone "${VISION_BACKBONE}" \
-    --ppasta_feat_cache "datasets/phoenix-vision_feats/A4B_features" \
+    --ppasta_feat_cache "datasets/phoenix-vision_feats_pooled/A4B_features" \
     --ppasta_n_tokens 0 \
     --output_dir "${OUTPUT_DIR}" \
     --num_workers 8 \

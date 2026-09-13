@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$(dirname "$0")/slib/monitor_cmd.bash"
 
@@ -11,7 +14,7 @@ SAVE_PATH="datasets/phoenix-vision_feats_pooled/A4B_features"
 BATCH_SIZE=128
 NUM_WORKERS=8
 FEATURE_MODE="gap"
-MAX_SOFT_TOKENS=70  # 70→63 ViT tokens (7×9), 140→~126, 280→~252 per frame
+MAX_SOFT_TOKENS=70  # 70->63 ViT tokens (7×9), 140->~126, 280→~252 per frame
 DEBUG=false  # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
 SPLITS=(train dev test)
 # ==============
@@ -31,8 +34,6 @@ echo "Using ${NUM_SHARDS} GPU(s): ${GPU_IDS[*]}"
 
 mkdir -p "${SAVE_PATH}"
 
-SPLITS=(train dev test)
-
 # Run per-split: extract shards in parallel, then merge
 for SPLIT in "${SPLITS[@]}"; do
     echo "=== [${SPLIT}] extract ==="
@@ -42,7 +43,7 @@ for SPLIT in "${SPLITS[@]}"; do
         LABEL="extract_vision_feats_${SPLIT}_shard${k}"
         (
             export CUDA_VISIBLE_DEVICES="${GPU}"
-            monitor_cmd "${LABEL}" ${SAVE_PATH} python src/extract_vision_feats.py \
+            monitor_cmd "${LABEL}" ${SAVE_PATH} uv run python -m pasta.extract_vision_feats \
                 --img_path "${IMG_PATH}" \
                 --split "${SPLIT}" \
                 --hf-model-id "${HF_MODEL_ID}" \
@@ -63,7 +64,7 @@ for SPLIT in "${SPLITS[@]}"; do
     done
 
     echo "=== [${SPLIT}] merge ==="
-    python src/extract_vision_feats.py \
+    uv run python -m pasta.extract_vision_feats \
         --split "${SPLIT}" \
         --save_path "${SAVE_PATH}" \
         --num-shards "${NUM_SHARDS}" \

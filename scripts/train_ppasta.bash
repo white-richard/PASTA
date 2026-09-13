@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO_ROOT}"
+
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1  # flush Python output immediately so errors survive process-group kills
@@ -29,7 +32,7 @@ USE_GLOBAL_REPR="1"
 FRAME_GRAD_CACHE=""
 
 
-monitor_cmd "trainppastap" "out/ppasta" python src/train_ppasta.py \
+monitor_cmd "train_ppasta" "out/ppasta" uv run python -m pasta.train_ppasta \
     --batch-size 64 \
     --epochs 25 \
     --opt adamw \
@@ -58,4 +61,3 @@ monitor_cmd "trainppastap" "out/ppasta" python src/train_ppasta.py \
     ${USE_GLOBAL_REPR:+--use-global-repr} \
     ${FRAME_GRAD_CACHE:+--frame-grad-cache} \
     "$@"
-    # --max-frames 32 \
