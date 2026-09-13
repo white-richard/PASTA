@@ -1,4 +1,4 @@
 [submodule "repos/gradcache"]
 	path = repos/gradcache
-	url = git@github.com:white-richard/GradCache.git
+	url = https://github.com/white-richard/GradCache.git
 	branch = main
