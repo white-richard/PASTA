@@ -102,7 +102,7 @@ datasets/phoenix-translations/phoenix_translations_siglip2_{train,dev,test}.pt
 bash scripts/train_ppasta.bash
 ```
 
-PPASTA trains the Perceiver alignment stage against the translation embeddings. The default script consumes the cached visual features from [step 1](<README#Extract visual features>) instead of running the vision tower again.
+PPASTA trains the Perceiver alignment stage against the translation embeddings. The default script consumes the cached visual features from Extract visual features instead of running the vision tower again.
 
 Output:
 
