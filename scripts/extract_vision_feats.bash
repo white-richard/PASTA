@@ -15,7 +15,7 @@ BATCH_SIZE=128
 NUM_WORKERS=8
 FEATURE_MODE="gap"
 MAX_SOFT_TOKENS=70  # 70->63 ViT tokens (7×9), 140->~126, 280→~252 per frame
-DEBUG=false  # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
+DEBUG=true  # set to true for a quick smoke-test (4×BATCH_SIZE frames per shard)
 SPLITS=(train dev test)
 # ==============
 

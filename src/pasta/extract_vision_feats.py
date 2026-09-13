@@ -245,6 +245,8 @@ def run_extract(args) -> None:
         vid, frames = dataset[i]
         for idx, path in enumerate(frames):
             entries.append((vid, idx, path))
+        if args.debug and len(entries) >= 4 * args.batch_size * args.num_shards:
+            break
     entries.sort()
 
     entries = entries[args.shard_id :: args.num_shards]
