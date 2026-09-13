@@ -1,0 +1,13 @@
+name: PASTA
+
+data:
+  label_path:
+    train: datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.train.corpus.csv
+    dev: datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.dev.corpus.csv
+    test: datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/annotations/manual/PHOENIX-2014-T.test.corpus.csv
+  img_path: datasets/PHOENIX-2014-T-release-v3/PHOENIX-2014-T/features/fullFrame-210x260px
+  max_length: 500
+
+training:
+  # Set to "online" to enable Weights & Biases logging.
+  wandb: disabled
