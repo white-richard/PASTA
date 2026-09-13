@@ -9,7 +9,6 @@ log/
 *.npz
 *.tar.gz
 *.zip
-uv.lock
 .claude
 datasets
 .zed
