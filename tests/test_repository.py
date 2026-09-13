@@ -13,7 +13,7 @@ def test_config_does_not_require_description_features() -> None:
 
 
 def test_supported_scripts_share_feature_cache_path() -> None:
-    for script in ("extract_vision_feats.bash", "train_ppasta.bash", "train_pasta.bash", "run_tui.bash"):
+    for script in ("extract_vision_feats.bash", "train_ppasta.bash", "train_pasta.bash"):
         text = (ROOT / "scripts" / script).read_text()
         assert FEATURE_CACHE in text, script
 

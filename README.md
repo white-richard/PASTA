@@ -45,7 +45,7 @@ Install [uv](https://docs.astral.sh/uv/) and clone the repository with its GradC
 
 ```bash
 git submodule update --init --recursive
-uv sync --extra tui --extra dev
+uv sync --extra dev
 uv pip install -e repos/gradcache
 ```
 
