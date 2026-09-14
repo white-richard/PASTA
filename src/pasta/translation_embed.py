@@ -10,6 +10,7 @@ import torch
 import yaml
 from tqdm import tqdm
 from transformers import AutoTokenizer, SiglipTextModel
+from transformers.utils import logging as hf_logging
 
 from .data_io import load_translations
 
@@ -52,6 +53,7 @@ def main() -> None:
     print("  ".join(f"{split}: {len(items)}" for split, items in translations.items()))
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    hf_logging.set_verbosity_error()
     tokenizer = AutoTokenizer.from_pretrained(args.model_id)
     model = SiglipTextModel.from_pretrained(args.model_id).to(device)
     model.eval()
